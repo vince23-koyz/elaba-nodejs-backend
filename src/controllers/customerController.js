@@ -59,3 +59,29 @@ exports.loginCustomer = (req, res) => {
     });
   });
 };
+
+exports.getCustomer = (req, res) => {
+  const { customerId } = req.params;
+
+  const sql = 'SELECT customer_id, first_name, last_name, username, phone_number FROM customer WHERE customer_id = ?';
+  db.query(sql, [customerId], (err, results) => {
+    if (err) {
+      console.error('Database error:', err);
+      return res.status(500).json({ message: 'Database error', error: err });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    const customer = results[0];
+    res.json({ 
+      customer_id: customer.customer_id,
+      name: `${customer.first_name} ${customer.last_name}`,
+      first_name: customer.first_name,
+      last_name: customer.last_name,
+      username: customer.username,
+      phone_number: customer.phone_number
+    });
+  });
+};

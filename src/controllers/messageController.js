@@ -65,8 +65,78 @@ const getMessagesByShop = (req, res) => {
   });
 };
 
+// Get all conversations for a user
+const getConversations = (req, res) => {
+  const { userType, userId } = req.params;
+
+  let sql;
+  if (userType === 'customer') {
+    sql = `
+      SELECT DISTINCT 
+        m.shop_id,
+        m.receiver_id as contact_id,
+        m.receiver_type as contact_type,
+        s.shop_name as contact_name,
+        (SELECT message_text FROM messages 
+         WHERE shop_id = m.shop_id 
+         AND ((sender_type = 'customer' AND sender_id = ? AND receiver_type = 'admin') 
+              OR (sender_type = 'admin' AND receiver_type = 'customer' AND receiver_id = ?))
+         ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT created_at FROM messages 
+         WHERE shop_id = m.shop_id 
+         AND ((sender_type = 'customer' AND sender_id = ? AND receiver_type = 'admin') 
+              OR (sender_type = 'admin' AND receiver_type = 'customer' AND receiver_id = ?))
+         ORDER BY created_at DESC LIMIT 1) as last_message_time
+      FROM messages m
+      LEFT JOIN shops s ON m.shop_id = s.shop_id
+      WHERE (m.sender_type = 'customer' AND m.sender_id = ?) 
+         OR (m.receiver_type = 'customer' AND m.receiver_id = ?)
+      ORDER BY last_message_time DESC
+    `;
+    db.query(sql, [userId, userId, userId, userId, userId, userId], (err, results) => {
+      if (err) {
+        console.error("Error fetching conversations:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.json(results);
+    });
+  } else {
+    // For admin users
+    sql = `
+      SELECT DISTINCT 
+        m.shop_id,
+        m.sender_id as contact_id,
+        m.sender_type as contact_type,
+        CONCAT(c.first_name, ' ', c.last_name) as contact_name,
+        (SELECT message_text FROM messages 
+         WHERE shop_id = m.shop_id 
+         AND ((sender_type = 'customer' AND receiver_type = 'admin' AND receiver_id = ?) 
+              OR (sender_type = 'admin' AND sender_id = ? AND receiver_type = 'customer'))
+         ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT created_at FROM messages 
+         WHERE shop_id = m.shop_id 
+         AND ((sender_type = 'customer' AND receiver_type = 'admin' AND receiver_id = ?) 
+              OR (sender_type = 'admin' AND sender_id = ? AND receiver_type = 'customer'))
+         ORDER BY created_at DESC LIMIT 1) as last_message_time
+      FROM messages m
+      LEFT JOIN customer c ON m.sender_id = c.customer_id AND m.sender_type = 'customer'
+      WHERE (m.receiver_type = 'admin' AND m.receiver_id = ?) 
+         OR (m.sender_type = 'admin' AND m.sender_id = ?)
+      ORDER BY last_message_time DESC
+    `;
+    db.query(sql, [userId, userId, userId, userId, userId, userId], (err, results) => {
+      if (err) {
+        console.error("Error fetching conversations:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+      res.json(results);
+    });
+  }
+};
+
 module.exports = {
   createMessage,
   getConversation,
-  getMessagesByShop
+  getMessagesByShop,
+  getConversations
 };

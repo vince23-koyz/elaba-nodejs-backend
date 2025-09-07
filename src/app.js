@@ -45,12 +45,45 @@ app.use('/api/messages', messageRoutes);
 io.on('connection', (socket) => {
   console.log('🟢 A user connected:', socket.id);
 
+  // Join user to a room
+  socket.on('join', (userData) => {
+    const { userId, userType } = userData;
+    const roomId = `user_${userType}_${userId}`;
+    socket.join(roomId);
+    console.log(`👤 User ${userId} (${userType}) joined room: ${roomId}`);
+  });
+
+  // Join conversation room
+  socket.on('joinConversation', (conversationId) => {
+    socket.join(conversationId);
+    console.log(`💬 User joined conversation: ${conversationId}`);
+  });
+
+  // Leave conversation room
+  socket.on('leaveConversation', (conversationId) => {
+    socket.leave(conversationId);
+    console.log(`👋 User left conversation: ${conversationId}`);
+  });
+
   // Listen for sending messages
   socket.on('sendMessage', (messageData) => {
     console.log('📩 Message received:', messageData);
 
-    // Broadcast to all clients (or specific room later)
-    io.emit('receiveMessage', messageData);
+    // Send to specific user rooms only to avoid duplicates
+    const senderRoom = `user_${messageData.sender_type}_${messageData.sender_id}`;
+    const receiverRoom = `user_${messageData.receiver_type}_${messageData.receiver_id}`;
+    
+    const messageWithTimestamp = {
+      ...messageData,
+      id: Date.now(),
+      created_at: new Date().toISOString(),
+    };
+    
+    // Send to sender (for confirmation)
+    io.to(senderRoom).emit('receiveMessage', messageWithTimestamp);
+    
+    // Send to receiver
+    io.to(receiverRoom).emit('receiveMessage', messageWithTimestamp);
   });
 
   socket.on('disconnect', () => {
