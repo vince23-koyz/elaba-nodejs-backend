@@ -41,7 +41,7 @@ const OtpService = {
                     `This code expires in ${DISPLAY_EXPIRATION_MINUTES} minutes. ` +
                     `If you did not request this, please ignore this message.`;
     await sendSms(phoneNumber, message);
-
+    
     return {
       success: true,
       message: 'OTP sent successfully',
@@ -60,7 +60,7 @@ const OtpService = {
     if (rows.length === 0) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
-
+    
     const otpRecord = rows[0];
     const now = new Date();
 

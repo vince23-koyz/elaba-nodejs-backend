@@ -34,16 +34,6 @@ const io = new Server(server, {
   }
 });
 
-app.get('/test-db', (req, res) => {
-  connection.query('SELECT 1 + 1 AS result', (err, results) => {
-    if (err) {
-      return res.status(500).json({ success: false, error: err.message });
-    }
-    res.json({ success: true, result: results[0].result });
-  });
-});
-
-
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
