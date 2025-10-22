@@ -1,8 +1,7 @@
-// eLaba-backend/src/config/firebase.js
+// src/config/firebase.js
 const admin = require("firebase-admin");
-const serviceAccount = require("../../elaba-app-firebase-adminsdk-fbsvc-5bfbc77238.json");
 
-// Initialize Firebase Admin SDK
+const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
