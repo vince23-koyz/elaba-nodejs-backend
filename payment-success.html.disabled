@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Payment Successful - eLaba</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #6bd0d7, #2d79d1);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+            width: 90%;
+        }
+        .success-icon {
+            width: 80px;
+            height: 80px;
+            background: #28a745;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+        }
+        .checkmark {
+            color: white;
+            font-size: 40px;
+            font-weight: bold;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 24px;
+        }
+        p {
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+        .return-info {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .return-info p {
+            margin: 0;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .elaba-logo {
+            color: #007bff;
+            font-size: 20px;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">
+            <span class="checkmark">✓</span>
+        </div>
+        <h1>Payment Successful!</h1>
+        <p>Your GCash payment has been processed successfully. Your booking is now confirmed.</p>
+        
+        <div class="return-info">
+            <p>You can now return to the eLaba mobile app to view your booking details.</p>
+        </div>
+        
+        <div class="elaba-logo">eLaba</div>
+    </div>
+
+    <script>
+        // Attempt to close the window/webview after a delay
+        setTimeout(() => {
+            // Try to close the window (works in some mobile webviews)
+            try {
+                window.close();
+            } catch (e) {
+                console.log('Cannot close window programmatically');
+            }
+            
+            // Try to go back in history
+            try {
+                if (window.history.length > 1) {
+                    window.history.back();
+                }
+            } catch (e) {
+                console.log('Cannot navigate back');
+            }
+        }, 3000); // Close after 3 seconds
+    </script>
+</body>
+</html>

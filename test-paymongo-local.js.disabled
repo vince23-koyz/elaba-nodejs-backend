@@ -1,0 +1,105 @@
+// test-paymongo.js
+// Simple test script to verify PayMongo integration via Backend
+// Run this in Node.js environment to test the backend PayMongo service
+
+const axios = require('axios');
+
+const BACKEND_BASE_URL = 'http://localhost:5000/api';
+
+async function testBackendPayMongoConnection() {
+  console.log('🧪 Testing Backend PayMongo Connection...');
+  
+  try {
+    // Test creating a GCash payment via backend
+    const response = await axios.post(
+      `${BACKEND_BASE_URL}/payments/gcash/create`,
+      {
+        amount: 100, // 100 PHP for testing
+        description: 'Test payment for eLaba - GCash Integration',
+        customerInfo: {
+          name: 'Juan Dela Cruz',
+          email: 'juan@example.com',
+          phone: '09123456789'
+        }
+        // bookingId is now optional
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('✅ Backend PayMongo connection successful!');
+    console.log('📝 Payment Intent ID:', response.data.data.paymentIntentId);
+    console.log('� Redirect URL:', response.data.data.redirectUrl ? 'Available' : 'Not available');
+    console.log('📋 Status:', response.data.data.status);
+    
+    return response.data.data;
+    
+  } catch (error) {
+    console.error('❌ Backend PayMongo connection failed:');
+    console.error('Error:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function testPaymentStatusCheck(paymentIntentId) {
+  console.log('\n🧪 Testing Payment Status Check...');
+  
+  try {
+    const response = await axios.get(
+      `${BACKEND_BASE_URL}/payments/gcash/status/${paymentIntentId}`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    console.log('✅ Payment status check successful!');
+    console.log('� Status:', response.data.status);
+    console.log('🔍 Success:', response.data.success);
+    
+    return response.data;
+    
+  } catch (error) {
+    console.error('❌ Payment status check failed:');
+    console.error('Error:', error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function runTests() {
+  console.log('🚀 Starting Backend PayMongo Integration Tests for eLaba\n');
+  
+  const paymentResult = await testBackendPayMongoConnection();
+  let statusResult = null;
+  
+  if (paymentResult && paymentResult.paymentIntentId) {
+    statusResult = await testPaymentStatusCheck(paymentResult.paymentIntentId);
+  }
+  
+  if (paymentResult && statusResult) {
+    console.log('\n🎉 All tests passed! Backend PayMongo integration is ready for eLaba.');
+    console.log('\n📋 Next Steps:');
+    console.log('1. Start the backend server (npm run dev)');
+    console.log('2. Test the integration in the React Native app');
+    console.log('3. Complete a test payment with GCash');
+    console.log('4. Verify payment status updates');
+    console.log('5. Test error scenarios and edge cases');
+  } else {
+    console.log('\n❌ Some tests failed. Please check:');
+    console.log('1. Backend server is running (npm run dev)');
+    console.log('2. PayMongo keys are set in .env file');
+    console.log('3. Database connection is working');
+  }
+}
+
+// Run the tests
+runTests().catch(console.error);
+
+module.exports = {
+  testBackendPayMongoConnection,
+  testPaymentStatusCheck,
+};
