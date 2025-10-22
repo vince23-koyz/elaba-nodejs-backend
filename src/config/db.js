@@ -10,11 +10,11 @@ const pool = mysql.createPool({
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'elaba_db',
   waitForConnections: true,
-  connectionLimit: 10, // limit para maiwasan ang sobrang sabay-sabay
-  queueLimit: 0        // 0 = unlimited queue
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-// ✅ Convert to promise-based pool
+//Convert to promise-based pool
 const db = pool.promise();
 
 // Test the connection
