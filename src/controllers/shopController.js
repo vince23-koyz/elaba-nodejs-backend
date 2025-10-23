@@ -19,7 +19,8 @@ exports.createShop = async (req, res) => {
       logo = `${baseUrl}/uploads/shop-images/${filename}`;
     }
   }
-  const shopStatus = status || 'active';
+  // Default to 'pending' when creating a new shop unless explicitly provided
+  const shopStatus = status || 'pending';
 
   try {
     let sql, params;
@@ -46,7 +47,8 @@ exports.createShop = async (req, res) => {
       success: true,
       message: "Shop created successfully",
       shop_id: result.insertId,
-      logo: logo
+      logo: logo,
+      status: shopStatus,
     });
   } catch (err) {
     console.error("DB Error (createShop):", err);
@@ -107,7 +109,7 @@ exports.updateShop = async (req, res) => {
   try {
     let sql, params;
 
-    // Handle image upload - use same column as RegisterShop (logo)
+  // Handle image upload - use same column as RegisterShop (logo)
     if (req.file) {
       // Build URL from Cloudinary or local disk
       let logoPath = '';
@@ -121,16 +123,30 @@ exports.updateShop = async (req, res) => {
         logoPath = `${baseUrl}/uploads/shop-images/${filename}`;
       }
       console.log('Updating with image:', logoPath);
-      sql = `UPDATE shop 
-             SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?
-             WHERE shop_id=?`;
-      params = [name, address, website, owner_name, operation_hours, logoPath, id];
+      if (typeof status !== 'undefined') {
+   sql = `UPDATE shop 
+     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?, status=?
+     WHERE shop_id=?`;
+   params = [name, address, website, owner_name, operation_hours, logoPath, status, id];
+      } else {
+   sql = `UPDATE shop 
+     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?
+     WHERE shop_id=?`;
+   params = [name, address, website, owner_name, operation_hours, logoPath, id];
+      }
     } else {
       console.log('Updating without image');
-      sql = `UPDATE shop 
-             SET name=?, address=?, website=?, owner_name=?, operation_hours=?
-             WHERE shop_id=?`;
-      params = [name, address, website, owner_name, operation_hours, id];
+      if (typeof status !== 'undefined') {
+   sql = `UPDATE shop 
+     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, status=?
+     WHERE shop_id=?`;
+   params = [name, address, website, owner_name, operation_hours, status, id];
+      } else {
+   sql = `UPDATE shop 
+     SET name=?, address=?, website=?, owner_name=?, operation_hours=?
+     WHERE shop_id=?`;
+   params = [name, address, website, owner_name, operation_hours, id];
+      }
     }
 
     console.log('Executing SQL:', sql);
@@ -144,6 +160,9 @@ exports.updateShop = async (req, res) => {
     const responseData = { message: 'Shop updated successfully' };
     if (req.file) {
       responseData.logo = `/uploads/shop-images/${req.file.filename}`;
+    }
+    if (typeof status !== 'undefined') {
+      responseData.status = status;
     }
     
     console.log('Sending response:', responseData);
