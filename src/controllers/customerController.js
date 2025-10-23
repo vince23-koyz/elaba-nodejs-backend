@@ -249,21 +249,8 @@ exports.updateProfilePicture = async (req, res) => {
       });
     }
 
-    // Validate file type
-    if (!req.file.mimetype.startsWith('image/')) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'Invalid file type. Please upload an image.' 
-      });
-    }
-
-    // Validate file size (5MB limit)
-    if (req.file.size > 5 * 1024 * 1024) {
-      return res.status(400).json({ 
-        success: false,
-        message: 'File size too large. Maximum size is 5MB.' 
-      });
-    }
+    // req.file.path is the full Cloudinary URL
+    const profileUrl = req.file.path;
 
     // Check if customer exists
     const checkSql = 'SELECT customer_id, profile_picture FROM customer WHERE customer_id = ?';
@@ -276,17 +263,14 @@ exports.updateProfilePicture = async (req, res) => {
       });
     }
 
-    // Store just the filename (not the full path)
-    const filename = req.file.filename;
-
-    // Update customer profile picture
+    // Update customer profile picture in DB
     const updateSql = 'UPDATE customer SET profile_picture = ? WHERE customer_id = ?';
-    await db.query(updateSql, [filename, customerId]);
+    await db.query(updateSql, [profileUrl, customerId]);
 
     res.json({ 
       success: true, 
       message: 'Profile picture updated successfully',
-      profile_picture: filename
+      profile_picture: profileUrl // return Cloudinary URL
     });
   } catch (err) {
     console.error("DB Error (updateProfilePicture):", err);
