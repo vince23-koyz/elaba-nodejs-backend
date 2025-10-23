@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const upload = require('../config/multer');
+const cloudinary = require('cloudinary').v2;
 
 router.post('/upload', upload.single('image'), (req, res) => {
   try {
@@ -9,6 +10,16 @@ router.post('/upload', upload.single('image'), (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Image upload failed' });
   }
+});
+
+// Simple status endpoint to help verify Cloudinary env vars on the server (no secrets exposed)
+router.get('/status', (req, res) => {
+  const cfg = cloudinary.config();
+  res.json({
+    cloud_name_set: !!cfg.cloud_name,
+    api_key_set: !!cfg.api_key,
+    api_secret_set: !!cfg.api_secret,
+  });
 });
 
 module.exports = router;

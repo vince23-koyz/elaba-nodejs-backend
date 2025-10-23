@@ -14,11 +14,23 @@ router.get('/:customerId', customerController.getCustomer);
 router.put('/:customerId', customerController.updateCustomer);
 // Profile picture upload with explicit error handling so Cloudinary/multer errors return clear JSON
 router.post('/:customerId/profile-picture', (req, res, next) => {
+	console.log('➡️  Incoming profile picture upload for customer:', req.params.customerId);
+	console.log('Headers:', {
+		'content-type': req.headers['content-type'],
+		'user-agent': req.headers['user-agent'],
+		'content-length': req.headers['content-length']
+	});
 	upload.single('profilePicture')(req, res, function(err) {
 		if (err) {
 			// Multer or Cloudinary error
-			const status = err.name === 'MulterError' ? 400 : 500;
-			return res.status(status).json({ success: false, message: err.message || 'Upload failed' });
+				console.error('❌ Upload middleware error:', {
+					name: err.name,
+					message: err.message,
+					stack: err.stack,
+				});
+				const status = err.name === 'MulterError' ? 400 : 500;
+				const safeMessage = err && (err.message || String(err));
+				return res.status(status).json({ success: false, message: safeMessage || 'Upload failed' });
 		}
 		return customerController.updateProfilePicture(req, res, next);
 	});
