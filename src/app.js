@@ -18,6 +18,7 @@ const messageRoutes = require('./routes/messageRoutes');
 const notificationRoutes = require("./routes/notificationRoutes");
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const otpRoutes = require('./routes/otpRoutes');
+const imageRoutes = require('./routes/imageRoutes');
 
 
 const app = express();
@@ -53,6 +54,7 @@ app.use('/api/messages', messageRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use('/api/superadmin', superAdminRoutes);
 app.use('/api/otp', otpRoutes);
+app.use('/api/images', imageRoutes);
 
 // Payment success page - temporarily disabled
 // app.get('/payment/success', (req, res) => {
