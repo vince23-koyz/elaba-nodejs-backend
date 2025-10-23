@@ -1,4 +1,29 @@
 const db = require('../config/db'); 
+const { io } = require('../app');
+
+// Helper: get admin_id for a given shop_id
+async function getAdminIdByShop(shopId) {
+  try {
+    const [rows] = await db.query('SELECT admin_id FROM shop WHERE shop_id = ?', [shopId]);
+    if (rows && rows.length > 0) return rows[0].admin_id;
+    return null;
+  } catch (e) {
+    console.error('Error fetching admin_id by shop:', e);
+    return null;
+  }
+}
+
+// Helper: emit booking event to the admin room of the shop
+async function emitBookingEvent(shopId, eventName, payload = {}) {
+  try {
+    const adminId = await getAdminIdByShop(shopId);
+    if (!adminId) return;
+    const room = `user_admin_${adminId}`;
+    io.to(room).emit(eventName, { shopId, ...payload });
+  } catch (e) {
+    console.error('Error emitting booking event:', e);
+  }
+}
 
 // CREATE Booking
 exports.createBooking = async (req, res) => {
@@ -17,6 +42,12 @@ exports.createBooking = async (req, res) => {
                  VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
     const [result] = await db.query(sql, [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id]);
+
+    // Emit socket event for real-time updates
+    emitBookingEvent(shop_id, 'bookingCreated', {
+      bookingId: result.insertId,
+      status,
+    });
 
     res.status(201).json({
       message: 'Booking created successfully',
@@ -135,6 +166,16 @@ exports.updateBookingStatus = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
+    // Fetch shop_id to target the correct admin room
+    const [shopRows] = await db.query('SELECT shop_id FROM booking WHERE booking_id = ?', [id]);
+    const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
+    if (shopId) {
+      emitBookingEvent(shopId, 'bookingUpdated', {
+        bookingId: Number(id),
+        status,
+      });
+    }
+
     res.json({ 
       message: 'Booking status updated successfully',
       booking_id: id,
@@ -171,6 +212,18 @@ exports.updateBookingDate = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
+    // Emit update event so clients can refresh
+    const [shopRows] = await db.query('SELECT shop_id, status FROM booking WHERE booking_id = ?', [id]);
+    const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
+    const status = shopRows && shopRows[0] ? shopRows[0].status : undefined;
+    if (shopId) {
+      emitBookingEvent(shopId, 'bookingUpdated', {
+        bookingId: Number(id),
+        status,
+        booking_date,
+      });
+    }
+
     res.json({
       message: 'Booking date updated successfully',
       booking_id: id,
@@ -200,6 +253,16 @@ exports.updateBooking = async (req, res) => {
     const [result] = await db.query(sql, [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id, id]);
     
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Booking not found' });
+
+    // Emit update event
+    if (shop_id) {
+      emitBookingEvent(shop_id, 'bookingUpdated', {
+        bookingId: Number(id),
+        status,
+        booking_date,
+      });
+    }
+
     res.json({ message: 'Booking updated successfully' });
   } catch (err) {
     console.error("DB Error (updateBooking):", err);
@@ -212,12 +275,22 @@ exports.deleteBooking = async (req, res) => {
   const { id } = req.params;
 
   try {
+    // Capture shop_id before deletion
+    const [shopRows] = await db.query('SELECT shop_id FROM booking WHERE booking_id = ?', [id]);
+    const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
+
     // delete payment first then booking (foreign key safe)
     await db.query('DELETE FROM payment WHERE booking_id = ?', [id]);
     
     const [result] = await db.query('DELETE FROM booking WHERE booking_id = ?', [id]);
     
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Booking not found' });
+
+    // Emit deleted event
+    if (shopId) {
+      emitBookingEvent(shopId, 'bookingDeleted', { bookingId: Number(id) });
+    }
+
     res.json({ message: 'Booking and payment deleted successfully' });
   } catch (err) {
     console.error("DB Error (deleteBooking):", err);
