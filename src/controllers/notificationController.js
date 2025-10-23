@@ -166,7 +166,7 @@ exports.sendNotificationToCustomer = async (req, res) => {
     const [tokenRows] = await db.query(
       `SELECT token 
          FROM device_tokens 
-        WHERE account_id = ? AND account_type = 'customer'`,
+        WHERE account_id = ? AND account_type = 'customer' AND is_active = 1`,
       [customerId]
     );
 
@@ -270,7 +270,7 @@ exports.sendNotificationToShop = async (req, res) => {
     const [tokenRows] = await db.query(
       `SELECT token 
          FROM device_tokens 
-        WHERE account_id = ? AND account_type = 'admin'`,
+        WHERE account_id = ? AND account_type = 'admin' AND is_active = 1`,
       [adminId]
     );
 
@@ -333,7 +333,7 @@ exports.testNotif = async (req, res) => {
   try {
     // Kunin muna yung token mula DB
     const [rows] = await db.query(
-      "SELECT token FROM device_tokens WHERE account_id = ? AND account_type = ? LIMIT 1",
+      "SELECT token FROM device_tokens WHERE account_id = ? AND account_type = ? AND is_active = 1 LIMIT 1",
       [accountId, accountType]
     );
 
