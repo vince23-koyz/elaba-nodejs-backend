@@ -249,8 +249,18 @@ exports.updateProfilePicture = async (req, res) => {
       });
     }
 
-    // req.file.path is the full Cloudinary URL
-    const profileUrl = req.file.path;
+    // Build a public URL from Cloudinary or local storage
+    let profileUrl = req.file.path;
+    try {
+      const isHttp = typeof profileUrl === 'string' && /^https?:\/\//.test(profileUrl);
+      if (!isHttp) {
+        const filename = req.file.filename || (profileUrl ? profileUrl.split(/[\\/]/).pop() : `profile_${Date.now()}.jpg`);
+        const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+        profileUrl = `${baseUrl}/uploads/profile/${filename}`;
+      }
+    } catch (_) {
+      // Fallback: keep whatever path we have
+    }
 
     // Check if customer exists
     const checkSql = 'SELECT customer_id, profile_picture FROM customer WHERE customer_id = ?';
