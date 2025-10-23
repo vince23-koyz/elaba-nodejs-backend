@@ -25,13 +25,21 @@ exports.createShop = async (req, res) => {
     let sql, params;
     
     if (admin_id) {
-      sql = "INSERT INTO shop (name, address, website, owner_name, operation_hours, admin_id, logo, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-      params = [name, address, website, owner_name, operation_hours, admin_id, logo, shopStatus];
+      sql = `
+        INSERT INTO shop 
+          (name, address, website, owner_name, operation_hours, status, admin_id, logo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      params = [name, address, website, owner_name, operation_hours, shopStatus, admin_id, logo];
     } else {
-      sql = "INSERT INTO shop (name, address, website, owner_name, operation_hours, logo, status) VALUES (?, ?, ?, ?, ?, ?, ?)";
-      params = [name, address, website, owner_name, operation_hours, logo, shopStatus];
+      sql = `
+        INSERT INTO shop 
+          (name, address, website, owner_name, operation_hours, status, logo)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `;
+      params = [name, address, website, owner_name, operation_hours, shopStatus, logo];
     }
-    
+
     const [result] = await db.query(sql, params);
 
     res.status(201).json({
