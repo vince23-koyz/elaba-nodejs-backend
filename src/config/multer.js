@@ -13,7 +13,10 @@ const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
     folder: 'elaba-images',
-    allowed_formats: ['jpg', 'png'],
+    // Allow common mobile formats. jpeg is separate from jpg; heic/heif from iOS devices.
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'],
+    // Let Cloudinary handle images from various sources automatically
+    resource_type: 'image', // or 'auto' but 'image' is appropriate here
   },
 });
 
