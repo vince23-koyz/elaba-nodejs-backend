@@ -33,15 +33,20 @@ if (hasCloudinary) {
   console.log('🖼️  Using Cloudinary storage for uploads');
 } else {
   // Fallback to local disk storage if Cloudinary not configured (useful for dev or temporary prod fallback)
-  const dest = path.join(__dirname, '../../uploads/profile');
-  try { fs.mkdirSync(dest, { recursive: true }); } catch {}
   storage = multer.diskStorage({
     destination: function (req, file, cb) {
+      // Choose subfolder by fieldname
+      let sub = 'misc';
+      if (file.fieldname === 'profilePicture') sub = 'profile';
+      if (file.fieldname === 'shopImage') sub = 'shop-images';
+      const dest = path.join(__dirname, '../../uploads', sub);
+      try { fs.mkdirSync(dest, { recursive: true }); } catch {}
       cb(null, dest);
     },
     filename: function (req, file, cb) {
       const ext = path.extname(file.originalname || '.jpg');
-      const name = `profile_${Date.now()}${ext}`;
+      const base = file.fieldname === 'shopImage' ? 'shop' : 'profile';
+      const name = `${base}_${Date.now()}${ext}`;
       cb(null, name);
     }
   });

@@ -6,8 +6,19 @@ exports.createShop = async (req, res) => {
   const { name, address, website, owner_name, operation_hours, admin_id, status } = req.body;
 
   // For superadmin, admin_id is optional
-  // Handle image upload
-  const logo = req.file ? `/uploads/shop-images/${req.file.filename}` : '';
+  // Handle image upload - support Cloudinary (absolute URL) or local disk
+  let logo = '';
+  if (req.file) {
+    const pathOrUrl = req.file.path;
+    const isHttp = typeof pathOrUrl === 'string' && /^https?:\/\//.test(pathOrUrl);
+    if (isHttp) {
+      logo = pathOrUrl;
+    } else {
+      const filename = req.file.filename || (pathOrUrl ? pathOrUrl.split(/[\\/]/).pop() : `shop_${Date.now()}.jpg`);
+      const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+      logo = `${baseUrl}/uploads/shop-images/${filename}`;
+    }
+  }
   const shopStatus = status || 'active';
 
   try {
@@ -90,7 +101,17 @@ exports.updateShop = async (req, res) => {
 
     // Handle image upload - use same column as RegisterShop (logo)
     if (req.file) {
-      const logoPath = `/uploads/shop-images/${req.file.filename}`;
+      // Build URL from Cloudinary or local disk
+      let logoPath = '';
+      const pathOrUrl = req.file.path;
+      const isHttp = typeof pathOrUrl === 'string' && /^https?:\/\//.test(pathOrUrl);
+      if (isHttp) {
+        logoPath = pathOrUrl;
+      } else {
+        const filename = req.file.filename || (pathOrUrl ? pathOrUrl.split(/[\\/]/).pop() : `shop_${Date.now()}.jpg`);
+        const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+        logoPath = `${baseUrl}/uploads/shop-images/${filename}`;
+      }
       console.log('Updating with image:', logoPath);
       sql = `UPDATE shop 
              SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?
