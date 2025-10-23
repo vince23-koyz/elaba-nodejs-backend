@@ -21,17 +21,37 @@ exports.updateDeviceToken = async (req, res) => {
   }
 
   try {
-    await db.query(
-      `INSERT INTO device_tokens (account_id, account_type, shop_id, token, created_at, updated_at)
-      VALUES (?, ?, ?, ?, NOW(), NOW())
-      ON DUPLICATE KEY UPDATE updated_at = NOW()`,
-      [accountId, accountType, shopId || null, token]
-    );
+    await db.query(`
+      INSERT INTO device_tokens (account_id, account_type, shop_id, token, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, NOW(), NOW())
+      ON DUPLICATE KEY UPDATE 
+        is_active = 1, 
+        updated_at = NOW()
+    `, [accountId, accountType, shopId || null, token]);
 
-    res.json({ success: true, message: "Device token saved/updated" });
+    res.json({ success: true, message: "Device token saved/updated and activated" });
   } catch (err) {
     console.error("❌ Error saving token:", err);
     res.status(500).json({ success: false, message: "Database error" });
+  }
+};
+
+// ✅ Deactivate device token (ginagamit ng app pag-logout)
+exports.deactivateDeviceToken = async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ success: false, message: "Token required" });
+
+  try {
+    await db.query(`
+      UPDATE device_tokens 
+      SET is_active = 0, updated_at = NOW()
+      WHERE token = ?
+    `, [token]);
+
+    res.json({ success: true, message: "Device token deactivated" });
+  } catch (err) {
+    console.error("❌ Error deactivating token:", err);
+    res.status(500).json({ success: false, message: "Failed to deactivate token" });
   }
 };
 

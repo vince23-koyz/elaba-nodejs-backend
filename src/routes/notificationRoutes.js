@@ -5,6 +5,9 @@ const notificationController = require("../controllers/notificationController");
 // Save device token
 router.post("/update-device-token", notificationController.updateDeviceToken);
 
+// Deactivate device token (logout)
+router.post("/deactivate-device-token", notificationController.deactivateDeviceToken);
+
 // Get notifications
 router.get("/", notificationController.getNotifications);
 
