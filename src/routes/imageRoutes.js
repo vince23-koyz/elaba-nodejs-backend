@@ -12,7 +12,6 @@ router.post('/upload', upload.single('image'), (req, res) => {
   }
 });
 
-// Simple status endpoint to help verify Cloudinary env vars on the server (no secrets exposed)
 router.get('/status', (req, res) => {
   const cfg = cloudinary.config();
   res.json({
