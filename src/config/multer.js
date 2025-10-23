@@ -12,7 +12,7 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'elaba-images', // folder sa Cloudinary
+    folder: 'elaba-images',
     allowed_formats: ['jpg', 'png'],
   },
 });
