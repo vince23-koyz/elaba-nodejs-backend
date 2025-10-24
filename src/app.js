@@ -35,6 +35,9 @@ const io = new Server(server, {
   }
 });
 
+// Make io available to route handlers via app.get('io') to avoid circular requires
+app.set('io', io);
+
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());

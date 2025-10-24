@@ -1,5 +1,4 @@
 const db = require('../config/db'); 
-const { io } = require('../app');
 
 // Helper: get admin_id for a given shop_id
 async function getAdminIdByShop(shopId) {
@@ -14,12 +13,14 @@ async function getAdminIdByShop(shopId) {
 }
 
 // Helper: emit booking event to the admin room of the shop
-async function emitBookingEvent(shopId, eventName, payload = {}) {
+async function emitBookingEvent(io, shopId, eventName, payload = {}) {
   try {
     const adminId = await getAdminIdByShop(shopId);
     if (!adminId) return;
     const room = `user_admin_${adminId}`;
-    io.to(room).emit(eventName, { shopId, ...payload });
+    if (io && io.to) {
+      io.to(room).emit(eventName, { shopId, ...payload });
+    }
   } catch (e) {
     console.error('Error emitting booking event:', e);
   }
@@ -44,16 +45,19 @@ exports.createBooking = async (req, res) => {
     const [result] = await db.query(sql, [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id]);
 
     // Emit socket event for real-time updates (admin + superadmin)
-    emitBookingEvent(shop_id, 'bookingCreated', {
+    const io = req.app.get('io');
+    emitBookingEvent(io, shop_id, 'bookingCreated', {
       bookingId: result.insertId,
       status,
     });
-    io.to('role_superadmin').emit('bookingCreated', {
-      shopId: shop_id,
-      bookingId: result.insertId,
-      status,
-      at: new Date().toISOString(),
-    });
+    if (io && io.to) {
+      io.to('role_superadmin').emit('bookingCreated', {
+        shopId: shop_id,
+        bookingId: result.insertId,
+        status,
+        at: new Date().toISOString(),
+      });
+    }
 
     res.status(201).json({
       message: 'Booking created successfully',
@@ -176,16 +180,19 @@ exports.updateBookingStatus = async (req, res) => {
     const [shopRows] = await db.query('SELECT shop_id FROM booking WHERE booking_id = ?', [id]);
     const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
     if (shopId) {
-      emitBookingEvent(shopId, 'bookingUpdated', {
+      const io = req.app.get('io');
+      emitBookingEvent(io, shopId, 'bookingUpdated', {
         bookingId: Number(id),
         status,
       });
-      io.to('role_superadmin').emit('bookingUpdated', {
-        shopId,
-        bookingId: Number(id),
-        status,
-        at: new Date().toISOString(),
-      });
+      if (io && io.to) {
+        io.to('role_superadmin').emit('bookingUpdated', {
+          shopId,
+          bookingId: Number(id),
+          status,
+          at: new Date().toISOString(),
+        });
+      }
     }
 
     res.json({ 
@@ -229,18 +236,21 @@ exports.updateBookingDate = async (req, res) => {
     const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
     const status = shopRows && shopRows[0] ? shopRows[0].status : undefined;
     if (shopId) {
-      emitBookingEvent(shopId, 'bookingUpdated', {
+      const io = req.app.get('io');
+      emitBookingEvent(io, shopId, 'bookingUpdated', {
         bookingId: Number(id),
         status,
         booking_date,
       });
-      io.to('role_superadmin').emit('bookingUpdated', {
-        shopId,
-        bookingId: Number(id),
-        status,
-        booking_date,
-        at: new Date().toISOString(),
-      });
+      if (io && io.to) {
+        io.to('role_superadmin').emit('bookingUpdated', {
+          shopId,
+          bookingId: Number(id),
+          status,
+          booking_date,
+          at: new Date().toISOString(),
+        });
+      }
     }
 
     res.json({
@@ -275,7 +285,8 @@ exports.updateBooking = async (req, res) => {
 
     // Emit update event
     if (shop_id) {
-      emitBookingEvent(shop_id, 'bookingUpdated', {
+      const io = req.app.get('io');
+      emitBookingEvent(io, shop_id, 'bookingUpdated', {
         bookingId: Number(id),
         status,
         booking_date,
@@ -307,12 +318,15 @@ exports.deleteBooking = async (req, res) => {
 
     // Emit deleted event
     if (shopId) {
-      emitBookingEvent(shopId, 'bookingDeleted', { bookingId: Number(id) });
-      io.to('role_superadmin').emit('bookingDeleted', {
-        shopId,
-        bookingId: Number(id),
-        at: new Date().toISOString(),
-      });
+      const io = req.app.get('io');
+      emitBookingEvent(io, shopId, 'bookingDeleted', { bookingId: Number(id) });
+      if (io && io.to) {
+        io.to('role_superadmin').emit('bookingDeleted', {
+          shopId,
+          bookingId: Number(id),
+          at: new Date().toISOString(),
+        });
+      }
     }
 
     res.json({ message: 'Booking and payment deleted successfully' });
