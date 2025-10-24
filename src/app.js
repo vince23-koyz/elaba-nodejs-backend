@@ -72,6 +72,14 @@ io.on('connection', (socket) => {
     const roomId = `user_${userType}_${userId}`;
     socket.join(roomId);
     console.log(`👤 User ${userId} (${userType}) joined room: ${roomId}`);
+    // Also join role-based room for broadcast by role
+    if (userType) {
+      const roleRoom = `role_${userType}`;
+      socket.join(roleRoom);
+      console.log(`👥 User ${userId} joined role room: ${roleRoom}`);
+    }
+    // Persist user info for disconnect logging
+    socket.userData = { userId, userType };
   });
 
   // Join conversation room

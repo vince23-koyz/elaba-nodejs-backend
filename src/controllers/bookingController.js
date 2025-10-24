@@ -43,10 +43,16 @@ exports.createBooking = async (req, res) => {
 
     const [result] = await db.query(sql, [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id]);
 
-    // Emit socket event for real-time updates
+    // Emit socket event for real-time updates (admin + superadmin)
     emitBookingEvent(shop_id, 'bookingCreated', {
       bookingId: result.insertId,
       status,
+    });
+    io.to('role_superadmin').emit('bookingCreated', {
+      shopId: shop_id,
+      bookingId: result.insertId,
+      status,
+      at: new Date().toISOString(),
     });
 
     res.status(201).json({
@@ -174,6 +180,12 @@ exports.updateBookingStatus = async (req, res) => {
         bookingId: Number(id),
         status,
       });
+      io.to('role_superadmin').emit('bookingUpdated', {
+        shopId,
+        bookingId: Number(id),
+        status,
+        at: new Date().toISOString(),
+      });
     }
 
     res.json({ 
@@ -221,6 +233,13 @@ exports.updateBookingDate = async (req, res) => {
         bookingId: Number(id),
         status,
         booking_date,
+      });
+      io.to('role_superadmin').emit('bookingUpdated', {
+        shopId,
+        bookingId: Number(id),
+        status,
+        booking_date,
+        at: new Date().toISOString(),
       });
     }
 
@@ -289,6 +308,11 @@ exports.deleteBooking = async (req, res) => {
     // Emit deleted event
     if (shopId) {
       emitBookingEvent(shopId, 'bookingDeleted', { bookingId: Number(id) });
+      io.to('role_superadmin').emit('bookingDeleted', {
+        shopId,
+        bookingId: Number(id),
+        at: new Date().toISOString(),
+      });
     }
 
     res.json({ message: 'Booking and payment deleted successfully' });

@@ -1,5 +1,6 @@
 // controllers/shopController.js
 const db = require('../config/db');
+const { io } = require('../app');
 
 // CREATE Shop
 exports.createShop = async (req, res) => {
@@ -50,6 +51,18 @@ exports.createShop = async (req, res) => {
       logo: logo,
       status: shopStatus,
     });
+
+    // Notify superadmins in real-time
+    try {
+      io.to('role_superadmin').emit('shopCreated', {
+        shopId: result.insertId,
+        status: shopStatus,
+        name: name,
+        at: new Date().toISOString(),
+      });
+    } catch (emitErr) {
+      console.error('Socket emit error (shopCreated):', emitErr);
+    }
   } catch (err) {
     console.error("DB Error (createShop):", err);
     res.status(500).json({ error: err.message });
@@ -167,6 +180,17 @@ exports.updateShop = async (req, res) => {
     
     console.log('Sending response:', responseData);
     res.json(responseData);
+
+    // Emit update for superadmin dashboards
+    try {
+      io.to('role_superadmin').emit('shopUpdated', {
+        shopId: Number(id),
+        status: typeof status !== 'undefined' ? status : undefined,
+        at: new Date().toISOString(),
+      });
+    } catch (emitErr) {
+      console.error('Socket emit error (shopUpdated):', emitErr);
+    }
   } catch (err) {
     console.error("DB Error (updateShop):", err);
     console.error("Error details:", {
