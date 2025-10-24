@@ -272,15 +272,24 @@ exports.updateBookingDate = async (req, res) => {
           at: new Date().toISOString(),
         });
       }
-      // Send notification to admin for reschedule
+      // Send notification to admin for reschedule, include customer name and new date
       const adminInfo = await getAdminInfoByShop(shopId);
       if (adminInfo && adminInfo.admin_id) {
+        // Fetch customer name
+        let customerName = '';
+        try {
+          const [bookingRows] = await db.query('SELECT c.first_name, c.last_name FROM booking b JOIN customer c ON b.customer_id = c.customer_id WHERE b.booking_id = ?', [id]);
+          if (bookingRows && bookingRows[0]) {
+            customerName = `${bookingRows[0].first_name} ${bookingRows[0].last_name}`.trim();
+          }
+        } catch (e) { customerName = ''; }
+        const formattedDate = new Date(booking_date).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
         await sendNotification({
           accountId: adminInfo.admin_id,
           accountType: 'admin',
           bookingId: id,
           title: 'Booking Rescheduled',
-          message: `A booking was rescheduled by the customer.`,
+          message: `Booking for ${customerName || 'a customer'} was rescheduled to ${formattedDate}.`,
           deviceToken: adminInfo.device_token || undefined,
         });
       }
