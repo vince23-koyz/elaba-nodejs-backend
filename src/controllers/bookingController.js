@@ -272,24 +272,34 @@ exports.updateBookingDate = async (req, res) => {
           at: new Date().toISOString(),
         });
       }
-      // Send notification to admin for reschedule, include customer name and new date
+      // Send notification to admin for reschedule, include customer name, new date, and service name
       const adminInfo = await getAdminInfoByShop(shopId);
       if (adminInfo && adminInfo.admin_id) {
-        // Fetch customer name
+        // Fetch customer name and service name
         let customerName = '';
+        let serviceName = '';
         try {
-          const [bookingRows] = await db.query('SELECT c.first_name, c.last_name FROM booking b JOIN customer c ON b.customer_id = c.customer_id WHERE b.booking_id = ?', [id]);
+          const [bookingRows] = await db.query(`
+            SELECT c.first_name, c.last_name, s.service_name
+            FROM booking b
+            JOIN customer c ON b.customer_id = c.customer_id
+            LEFT JOIN booking_service bs ON b.booking_id = bs.booking_id
+            LEFT JOIN service s ON bs.service_id = s.service_id
+            WHERE b.booking_id = ?
+            LIMIT 1
+          `, [id]);
           if (bookingRows && bookingRows[0]) {
             customerName = `${bookingRows[0].first_name} ${bookingRows[0].last_name}`.trim();
+            serviceName = bookingRows[0].service_name || '';
           }
-        } catch (e) { customerName = ''; }
+        } catch (e) { customerName = ''; serviceName = ''; }
         const formattedDate = new Date(booking_date).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
         await sendNotification({
           accountId: adminInfo.admin_id,
           accountType: 'admin',
           bookingId: id,
           title: 'Booking Rescheduled',
-          message: `Booking for ${customerName || 'a customer'} was rescheduled to ${formattedDate}.`,
+          message: `Booking for ${customerName || 'a customer'} (${serviceName || 'service'}) was rescheduled to ${formattedDate}.`,
           deviceToken: adminInfo.device_token || undefined,
         });
       }
