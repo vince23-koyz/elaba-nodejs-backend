@@ -1,10 +1,17 @@
 const db = require('../config/db'); 
+const { sendNotification } = require('../service/notificationService');
 
-// Helper: get admin_id for a given shop_id
-async function getAdminIdByShop(shopId) {
+// Helper: get admin_id and device token for a given shop_id
+async function getAdminInfoByShop(shopId) {
   try {
-    const [rows] = await db.query('SELECT admin_id FROM shop WHERE shop_id = ?', [shopId]);
-    if (rows && rows.length > 0) return rows[0].admin_id;
+    const [rows] = await db.query(`
+      SELECT s.admin_id, dt.token as device_token
+      FROM shop s
+      LEFT JOIN device_tokens dt ON dt.account_id = s.admin_id AND dt.account_type = 'admin'
+      WHERE s.shop_id = ?
+      LIMIT 1
+    `, [shopId]);
+    if (rows && rows.length > 0) return rows[0];
     return null;
   } catch (e) {
     console.error('Error fetching admin_id by shop:', e);
@@ -15,9 +22,9 @@ async function getAdminIdByShop(shopId) {
 // Helper: emit booking event to the admin room of the shop
 async function emitBookingEvent(io, shopId, eventName, payload = {}) {
   try {
-    const adminId = await getAdminIdByShop(shopId);
-    if (!adminId) return;
-    const room = `user_admin_${adminId}`;
+    const adminInfo = await getAdminInfoByShop(shopId);
+    if (!adminInfo || !adminInfo.admin_id) return;
+    const room = `user_admin_${adminInfo.admin_id}`;
     if (io && io.to) {
       io.to(room).emit(eventName, { shopId, ...payload });
     }
@@ -159,7 +166,7 @@ exports.getBookingById = async (req, res) => {
   }
 };
 
-// UPDATE Booking Status Only
+// UPDATE Booking Status Only (Cancel booking triggers notification)
 exports.updateBookingStatus = async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -176,7 +183,7 @@ exports.updateBookingStatus = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
-    // Fetch shop_id to target the correct admin room
+    // Fetch shop_id and admin info to target the correct admin room and send notification
     const [shopRows] = await db.query('SELECT shop_id FROM booking WHERE booking_id = ?', [id]);
     const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
     if (shopId) {
@@ -193,6 +200,20 @@ exports.updateBookingStatus = async (req, res) => {
           at: new Date().toISOString(),
         });
       }
+      // Send notification to admin if cancelled
+      if (status && status.toLowerCase() === 'cancelled') {
+        const adminInfo = await getAdminInfoByShop(shopId);
+        if (adminInfo && adminInfo.admin_id) {
+          await sendNotification({
+            accountId: adminInfo.admin_id,
+            accountType: 'admin',
+            bookingId: id,
+            title: 'Booking Cancelled',
+            message: `A booking was cancelled by the customer.`,
+            deviceToken: adminInfo.device_token || undefined,
+          });
+        }
+      }
     }
 
     res.json({ 
@@ -206,7 +227,7 @@ exports.updateBookingStatus = async (req, res) => {
   }
 };
 
-// UPDATE Booking Date (Reschedule)
+// UPDATE Booking Date (Reschedule triggers notification)
 exports.updateBookingDate = async (req, res) => {
   const { id } = req.params;
   const { booking_date } = req.body;
@@ -231,7 +252,7 @@ exports.updateBookingDate = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
-    // Emit update event so clients can refresh
+    // Emit update event so clients can refresh, and send notification
     const [shopRows] = await db.query('SELECT shop_id, status FROM booking WHERE booking_id = ?', [id]);
     const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
     const status = shopRows && shopRows[0] ? shopRows[0].status : undefined;
@@ -249,6 +270,18 @@ exports.updateBookingDate = async (req, res) => {
           status,
           booking_date,
           at: new Date().toISOString(),
+        });
+      }
+      // Send notification to admin for reschedule
+      const adminInfo = await getAdminInfoByShop(shopId);
+      if (adminInfo && adminInfo.admin_id) {
+        await sendNotification({
+          accountId: adminInfo.admin_id,
+          accountType: 'admin',
+          bookingId: id,
+          title: 'Booking Rescheduled',
+          message: `A booking was rescheduled by the customer.`,
+          deviceToken: adminInfo.device_token || undefined,
         });
       }
     }
