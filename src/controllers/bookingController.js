@@ -294,12 +294,23 @@ exports.updateBookingDate = async (req, res) => {
           }
         } catch (e) { customerName = ''; serviceName = ''; }
         const formattedDate = new Date(booking_date).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
+        // Construct a more natural message
+        let notifMsg = '';
+        if (customerName && serviceName) {
+          notifMsg = `${customerName} rescheduled their booking for ${serviceName} to ${formattedDate}.`;
+        } else if (customerName) {
+          notifMsg = `${customerName} rescheduled their booking to ${formattedDate}.`;
+        } else if (serviceName) {
+          notifMsg = `A customer rescheduled their booking for ${serviceName} to ${formattedDate}.`;
+        } else {
+          notifMsg = `A booking was rescheduled to ${formattedDate}.`;
+        }
         await sendNotification({
           accountId: adminInfo.admin_id,
           accountType: 'admin',
           bookingId: id,
           title: 'Booking Rescheduled',
-          message: `Booking for ${customerName || 'a customer'} (${serviceName || 'service'}) was rescheduled to ${formattedDate}.`,
+          message: notifMsg,
           deviceToken: adminInfo.device_token || undefined,
         });
       }
