@@ -23,7 +23,7 @@ exports.registerAdmin = async (req, res) => {
   } catch (err) {
     console.error("DB Error (registerAdmin):", err);
     if (err.code === "ER_DUP_ENTRY") {
-      return res.status(400).json({ message: 'Phone number already registered' });
+      return res.status(400).json({ message: 'Registration failed for this phone number. Please try a different one.Phone number already registered' });
     }
     res.status(500).json({ message: 'Database error', error: err.message });
   }
