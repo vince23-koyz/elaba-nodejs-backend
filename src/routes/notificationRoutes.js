@@ -8,6 +8,9 @@ router.post("/update-device-token", notificationController.updateDeviceToken);
 // Deactivate device token (logout)
 router.post("/deactivate-device-token", notificationController.deactivateDeviceToken);
 
+// Delete device token (hard delete on logout)
+router.post("/delete-device-token", notificationController.deleteDeviceToken);
+
 // Get notifications
 router.get("/", notificationController.getNotifications);
 

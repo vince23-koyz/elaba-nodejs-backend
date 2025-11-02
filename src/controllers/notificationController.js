@@ -13,6 +13,7 @@ const getIO = () => {
 };
 
 // ✅ Save device token (ginagamit ng app pag-login)
+// Ensure one row per unique token to avoid duplicates even if client retries
 exports.updateDeviceToken = async (req, res) => {
   const { accountId, accountType, shopId, token } = req.body;
 
@@ -21,15 +22,17 @@ exports.updateDeviceToken = async (req, res) => {
   }
 
   try {
-    await db.query(`
-      INSERT INTO device_tokens (account_id, account_type, shop_id, token, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, NOW(), NOW())
-      ON DUPLICATE KEY UPDATE 
-        is_active = 1, 
-        updated_at = NOW()
-    `, [accountId, accountType, shopId || null, token]);
+    // Remove any duplicate rows for the same token first (idempotent behavior)
+    await db.query('DELETE FROM device_tokens WHERE token = ?', [token]);
 
-    res.json({ success: true, message: "Device token saved/updated and activated" });
+    // Insert a single fresh row for this token
+    await db.query(
+      `INSERT INTO device_tokens (account_id, account_type, shop_id, token, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, NOW(), NOW())`,
+      [accountId, accountType, shopId || null, token]
+    );
+
+    res.json({ success: true, message: "Device token saved (deduped) and activated" });
   } catch (err) {
     console.error("❌ Error saving token:", err);
     res.status(500).json({ success: false, message: "Database error" });
@@ -52,6 +55,20 @@ exports.deactivateDeviceToken = async (req, res) => {
   } catch (err) {
     console.error("❌ Error deactivating token:", err);
     res.status(500).json({ success: false, message: "Failed to deactivate token" });
+  }
+};
+
+// ✅ Permanently delete a device token (used on logout)
+exports.deleteDeviceToken = async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ success: false, message: 'Token required' });
+
+  try {
+    const [result] = await db.query('DELETE FROM device_tokens WHERE token = ?', [token]);
+    res.json({ success: true, message: 'Device token deleted', affected: result.affectedRows });
+  } catch (err) {
+    console.error('❌ Error deleting token:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete token' });
   }
 };
 

@@ -107,12 +107,14 @@ exports.getBookings = async (req, res) => {
   
   try {
     let sql = `SELECT b.booking_id, b.booking_type, b.booking_date, b.status AS booking_status, b.total_amount, 
-                      b.shop_id, b.customer_id, s.name AS shop_name, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
-                      p.payment_id, p.payment_method, p.status AS payment_status, p.date
-               FROM booking b
-               JOIN shop s ON b.shop_id = s.shop_id
-               JOIN customer c ON b.customer_id = c.customer_id
-               LEFT JOIN payment p ON b.booking_id = p.booking_id`;
+       b.shop_id, b.customer_id, s.name AS shop_name, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
+       p.payment_id, p.payment_method, p.status AS payment_status, p.date,
+       b.service_id, srv.offers AS service_name
+     FROM booking b
+     JOIN shop s ON b.shop_id = s.shop_id
+     JOIN customer c ON b.customer_id = c.customer_id
+     LEFT JOIN payment p ON b.booking_id = p.booking_id
+     LEFT JOIN services srv ON b.service_id = srv.service_id`;
     
     const queryParams = [];
     const whereClauses = [];
@@ -204,14 +206,47 @@ exports.updateBookingStatus = async (req, res) => {
       if (status && status.toLowerCase() === 'cancelled') {
         const adminInfo = await getAdminInfoByShop(shopId);
         if (adminInfo && adminInfo.admin_id) {
-          await sendNotification({
+          // Enrich message with customer and service info
+          let customerName = '';
+          let serviceName = '';
+          try {
+            const [bookingRows] = await db.query(`
+              SELECT c.first_name, c.last_name, srv.offers AS service_name
+              FROM booking b
+              JOIN customer c ON b.customer_id = c.customer_id
+              LEFT JOIN services srv ON b.service_id = srv.service_id
+              WHERE b.booking_id = ?
+              LIMIT 1
+            `, [id]);
+            if (bookingRows && bookingRows[0]) {
+              customerName = `${bookingRows[0].first_name} ${bookingRows[0].last_name}`.trim();
+              serviceName = bookingRows[0].service_name || '';
+            }
+          } catch (e) { customerName = ''; serviceName = ''; }
+
+          const base = customerName ? `${customerName} cancelled` : 'A customer cancelled';
+          const details = serviceName ? ` booking for ${serviceName}` : ' a booking';
+          const message = `${base}${details} (Order #${id}).`;
+
+          const { savedNotification } = await sendNotification({
             accountId: adminInfo.admin_id,
             accountType: 'admin',
             bookingId: id,
             title: 'Booking Cancelled',
-            message: `A booking was cancelled by the customer.`,
+            message,
             deviceToken: adminInfo.device_token || undefined,
           });
+
+          // Emit real-time notification to the admin room
+          try {
+            const io = req.app.get('io');
+            const userRoom = `user_admin_${adminInfo.admin_id}`;
+            if (io && savedNotification) {
+              io.to(userRoom).emit('newNotification', savedNotification);
+            }
+          } catch (e) {
+            console.warn('⚠️ Failed to emit cancel notification via socket:', e?.message || e);
+          }
         }
       }
     }
@@ -280,11 +315,10 @@ exports.updateBookingDate = async (req, res) => {
         let serviceName = '';
         try {
           const [bookingRows] = await db.query(`
-            SELECT c.first_name, c.last_name, s.service_name
+            SELECT c.first_name, c.last_name, srv.offers AS service_name
             FROM booking b
             JOIN customer c ON b.customer_id = c.customer_id
-            LEFT JOIN booking_service bs ON b.booking_id = bs.booking_id
-            LEFT JOIN service s ON bs.service_id = s.service_id
+            LEFT JOIN services srv ON b.service_id = srv.service_id
             WHERE b.booking_id = ?
             LIMIT 1
           `, [id]);
@@ -305,7 +339,7 @@ exports.updateBookingDate = async (req, res) => {
         } else {
           notifMsg = `A booking was rescheduled to ${formattedDate}.`;
         }
-        await sendNotification({
+        const { savedNotification } = await sendNotification({
           accountId: adminInfo.admin_id,
           accountType: 'admin',
           bookingId: id,
@@ -313,6 +347,17 @@ exports.updateBookingDate = async (req, res) => {
           message: notifMsg,
           deviceToken: adminInfo.device_token || undefined,
         });
+
+        // Emit real-time notification to the admin room
+        try {
+          const io = req.app.get('io');
+          const userRoom = `user_admin_${adminInfo.admin_id}`;
+          if (io && savedNotification) {
+            io.to(userRoom).emit('newNotification', savedNotification);
+          }
+        } catch (e) {
+          console.warn('⚠️ Failed to emit reschedule notification via socket:', e?.message || e);
+        }
       }
     }
 

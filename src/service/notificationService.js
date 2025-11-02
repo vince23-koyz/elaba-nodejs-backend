@@ -33,12 +33,28 @@ async function sendPushOnly({ title, message, deviceToken }) {
 }
 
 // Main notification function that saves to DB and sends push
+// Returns the saved notification row for optional socket emission by callers
 async function sendNotification({ accountId, accountType, bookingId, title, message, deviceToken }) {
   // 1. Save to DB (in-app notification)
-  await db.query(
+  const [result] = await db.query(
     "INSERT INTO notifications (account_type, account_id, booking_id, title, message) VALUES (?, ?, ?, ?, ?)",
     [accountType, accountId, bookingId, title, message]
   );
+
+  const notificationId = result?.insertId;
+  let savedNotification = null;
+  try {
+    if (notificationId) {
+      const [rows] = await db.query(
+        'SELECT * FROM notifications WHERE notification_id = ? LIMIT 1',
+        [notificationId]
+      );
+      savedNotification = rows && rows[0] ? rows[0] : null;
+    }
+  } catch (e) {
+    // Not critical if we can't refetch; push will still be sent
+    console.warn('⚠️ Failed to re-fetch saved notification:', e?.message || e);
+  }
 
   // 2. Push notification
   if (deviceToken) {
@@ -56,6 +72,7 @@ async function sendNotification({ accountId, accountType, bookingId, title, mess
       data: {
         bookingId: bookingId ? bookingId.toString() : "",
         accountType,
+        notificationId: notificationId ? notificationId.toString() : '',
       },
     };
 
@@ -78,6 +95,8 @@ async function sendNotification({ accountId, accountType, bookingId, title, mess
       }
     }
   }
+
+  return { notificationId, savedNotification };
 }
 
 module.exports = { sendPushOnly, sendNotification };

@@ -6,6 +6,7 @@ const bodyParser = require('body-parser');
 const http = require('http'); 
 const { Server } = require('socket.io');
 const path = require('path');
+const db = require('./config/db');
 
 const customerRoutes = require('./routes/customerRoutes');
 const adminRoutes = require('./routes/adminRoutes');
@@ -66,11 +67,14 @@ app.use('/api/images', imageRoutes);
   
 
 // Socket.IO events
+// Track presence counts per user to set is_active online/offline accurately
+const userPresence = new Map(); // key: `${userType}:${userId}` -> count
+
 io.on('connection', (socket) => {
   console.log('🟢 A user is online:', socket.id);
 
   // Join user to a room
-  socket.on('join', (userData) => {
+  socket.on('join', async (userData) => {
     const { userId, userType } = userData;
     const roomId = `user_${userType}_${userId}`;
     socket.join(roomId);
@@ -83,6 +87,22 @@ io.on('connection', (socket) => {
     }
     // Persist user info for disconnect logging
     socket.userData = { userId, userType };
+
+    // Update presence counter and mark online in DB on first connection
+    try {
+      const key = `${userType}:${userId}`;
+      const current = userPresence.get(key) || 0;
+      userPresence.set(key, current + 1);
+      if (current === 0) {
+        await db.query(
+          'UPDATE device_tokens SET is_active = 1, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
+          [userId, userType]
+        );
+        socket.broadcast.emit('userOnline', { userId, userType, timestamp: new Date().toISOString() });
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to set presence online:', e?.message || e);
+    }
   });
 
   // Join conversation room
@@ -118,7 +138,7 @@ io.on('connection', (socket) => {
     io.to(receiverRoom).emit('receiveMessage', messageWithTimestamp);
   });
 
-  socket.on('disconnect', (reason) => {
+  socket.on('disconnect', async (reason) => {
     console.log(`🔴 User disconnected: ${socket.id} (Reason: ${reason})`);
     if (socket.userData) {
       console.log(`👤 Disconnected user: ${socket.userData.userId} (${socket.userData.userType})`);
@@ -131,6 +151,24 @@ io.on('connection', (socket) => {
         userType: socket.userData.userType,
         timestamp: new Date().toISOString()
       });
+
+      // Update presence counter and mark offline in DB when count reaches zero
+      try {
+        const key = `${socket.userData.userType}:${socket.userData.userId}`;
+        const current = userPresence.get(key) || 0;
+        const next = Math.max(0, current - 1);
+        if (next === 0) {
+          userPresence.delete(key);
+          await db.query(
+            'UPDATE device_tokens SET is_active = 0, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
+            [socket.userData.userId, socket.userData.userType]
+          );
+        } else {
+          userPresence.set(key, next);
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to set presence offline:', e?.message || e);
+      }
     }
     
     // Clean up any remaining rooms
