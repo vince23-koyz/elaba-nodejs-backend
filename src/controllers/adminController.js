@@ -14,7 +14,7 @@ exports.registerAdmin = async (req, res) => {
 
     const [result] = await db.query(sql, [
       first_name, last_name, street, zone, barangay, city, phone_number, hashedPassword
-    ]);
+    ]);   
 
     res.status(201).json({
       message: 'Admin registered successfully',

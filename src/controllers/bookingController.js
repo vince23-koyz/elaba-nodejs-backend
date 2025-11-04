@@ -168,7 +168,7 @@ exports.getBookingById = async (req, res) => {
   }
 };
 
-// UPDATE Booking Status Only (Cancel booking triggers notification)
+// UPDATE Booking Status Only (Cancel booking triggers notification; Confirm triggers customer notification for walk-in)
 exports.updateBookingStatus = async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -185,9 +185,12 @@ exports.updateBookingStatus = async (req, res) => {
       return res.status(404).json({ message: 'Booking not found' });
     }
 
-    // Fetch shop_id and admin info to target the correct admin room and send notification
-    const [shopRows] = await db.query('SELECT shop_id FROM booking WHERE booking_id = ?', [id]);
-    const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
+  // Fetch booking info to target proper rooms and optionally customer notification
+  const [shopRows] = await db.query('SELECT shop_id, booking_type, customer_id, booking_date FROM booking WHERE booking_id = ?', [id]);
+  const shopId = shopRows && shopRows[0] ? shopRows[0].shop_id : null;
+  const bookingType = shopRows && shopRows[0] ? (shopRows[0].booking_type || '') : '';
+  const customerId = shopRows && shopRows[0] ? shopRows[0].customer_id : null;
+  const bookingDate = shopRows && shopRows[0] ? shopRows[0].booking_date : null;
     if (shopId) {
       const io = req.app.get('io');
       emitBookingEvent(io, shopId, 'bookingUpdated', {
@@ -247,6 +250,76 @@ exports.updateBookingStatus = async (req, res) => {
           } catch (e) {
             console.warn('⚠️ Failed to emit cancel notification via socket:', e?.message || e);
           }
+        }
+      }
+
+      // Send notification to customer if confirmed and booking is walk-in
+      if (status && status.toLowerCase() === 'confirmed' && customerId) {
+        try {
+          const isWalkIn = (bookingType || '').toLowerCase() === 'walk in';
+          // Build localized message
+          let title = 'Booking Confirmed';
+          let message = '';
+          if (isWalkIn) {
+            // Format booking date in PH locale (fallback to ISO if invalid)
+            let formattedDate = '';
+            try {
+              const d = bookingDate ? new Date(bookingDate) : null;
+              formattedDate = d && !isNaN(d.getTime())
+                ? d.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
+                : '';
+            } catch (_) { formattedDate = ''; }
+            title = 'Walk-in Booking Confirmed';
+            message = `Nakumpirma na ang walk-in booking mo${formattedDate ? ` para sa ${formattedDate}` : ''}. Dalhin na lang ang palalabhan mo sa mismong booking date.`;
+          } else {
+            // Generic confirmation for non walk-in
+            message = `Your booking #${id} has been confirmed.`;
+          }
+
+          // Save notification to DB
+          const { savedNotification } = await sendNotification({
+            accountId: customerId,
+            accountType: 'customer',
+            bookingId: id,
+            title,
+            message,
+          });
+
+          // Emit via socket to the customer room
+          try {
+            const io = req.app.get('io');
+            const userRoom = `user_customer_${customerId}`;
+            if (io && savedNotification) {
+              io.to(userRoom).emit('newNotification', savedNotification);
+            }
+          } catch (e) {
+            console.warn('⚠️ Failed to emit confirm notification via socket:', e?.message || e);
+          }
+
+          // Send push to all active customer tokens (optional fan-out)
+          try {
+            const [tokenRows] = await db.query(
+              `SELECT token FROM device_tokens WHERE account_id = ? AND account_type = 'customer' AND is_active = 1`,
+              [customerId]
+            );
+            if (Array.isArray(tokenRows)) {
+              for (const row of tokenRows) {
+                try {
+                  await require('../service/notificationService').sendPushOnly({
+                    title,
+                    message,
+                    deviceToken: row.token,
+                  });
+                } catch (e) {
+                  // Already handled inside sendPushOnly
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('⚠️ Failed to fan-out push for confirm:', e?.message || e);
+          }
+        } catch (e) {
+          console.warn('⚠️ Failed to send customer confirm notification:', e?.message || e);
         }
       }
     }
