@@ -85,14 +85,52 @@ exports.updatePaymentStatus = async (req, res) => {
 
     // If marking as paid and not yet linked to a transaction, create one and link it
     if (nextStatus === 'paid') {
-      const [rows] = await db.query("SELECT amount, transaction_id FROM payment WHERE payment_id = ?", [id]);
+      // 1) Read current payment row
+      const [rows] = await db.query(
+        "SELECT amount, transaction_id, booking_id FROM payment WHERE payment_id = ?",
+        [id]
+      );
       const paymentRow = rows && rows[0] ? rows[0] : null;
-      if (paymentRow && (paymentRow.transaction_id == null || paymentRow.transaction_id === 0)) {
-        const total = paymentRow.amount != null ? Number(paymentRow.amount) : 0;
-        const [tx] = await db.query("INSERT INTO transaction (date, total_payment) VALUES (NOW(), ?)", [total]);
-        const newTxId = tx && tx.insertId ? tx.insertId : null;
-        if (newTxId != null) {
-          await db.query("UPDATE payment SET transaction_id = ? WHERE payment_id = ?", [newTxId, id]);
+      if (paymentRow) {
+        let ensuredAmount = paymentRow.amount != null ? Number(paymentRow.amount) : null;
+
+        // 2) If amount is missing/null, pull from booking.total_amount and update payment.amount
+        if (ensuredAmount == null || isNaN(ensuredAmount) || ensuredAmount <= 0) {
+          try {
+            if (paymentRow.booking_id) {
+              const [bRows] = await db.query(
+                "SELECT total_amount FROM booking WHERE booking_id = ? LIMIT 1",
+                [paymentRow.booking_id]
+              );
+              if (bRows && bRows[0] && bRows[0].total_amount != null) {
+                ensuredAmount = Number(bRows[0].total_amount) || 0;
+                // Persist the resolved amount back to payment for accurate sales reporting
+                await db.query(
+                  "UPDATE payment SET amount = ? WHERE payment_id = ?",
+                  [ensuredAmount, id]
+                );
+              } else {
+                ensuredAmount = 0;
+              }
+            } else {
+              ensuredAmount = 0;
+            }
+          } catch (e) {
+            console.warn('Failed to backfill payment.amount from booking:', e?.message || e);
+            ensuredAmount = 0;
+          }
+        }
+
+        // 3) Create and link a transaction if not already linked
+        if (paymentRow.transaction_id == null || paymentRow.transaction_id === 0) {
+          const [tx] = await db.query(
+            "INSERT INTO transaction (date, total_payment) VALUES (NOW(), ?)",
+            [ensuredAmount || 0]
+          );
+          const newTxId = tx && tx.insertId ? tx.insertId : null;
+          if (newTxId != null) {
+            await db.query("UPDATE payment SET transaction_id = ? WHERE payment_id = ?", [newTxId, id]);
+          }
         }
       }
     }
