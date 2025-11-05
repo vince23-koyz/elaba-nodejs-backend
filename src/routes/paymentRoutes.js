@@ -7,6 +7,8 @@ router.get("/", paymentController.getPayments);
 router.get("/:id", paymentController.getPaymentById);
 router.post("/", paymentController.createPayment);
 router.put("/:id/status", paymentController.updatePaymentStatus);
+router.put("/:id/transaction", paymentController.updatePaymentTransaction);
+router.get('/shop/:shopId/total', paymentController.getShopSales);
 
 // PayMongo GCash Payment Routes - Temporarily disabled, returns 503 status
 router.post("/gcash/create", paymentController.createGCashPayment);
