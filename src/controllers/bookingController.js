@@ -253,7 +253,7 @@ exports.updateBookingStatus = async (req, res) => {
         }
       }
 
-      // Send notification to customer if confirmed and booking is walk-in
+  // Send notification to customer if confirmed and booking is walk-in
       if (status && status.toLowerCase() === 'confirmed' && customerId) {
         try {
           const isWalkIn = (bookingType || '').toLowerCase() === 'walk in';
@@ -320,6 +320,60 @@ exports.updateBookingStatus = async (req, res) => {
           }
         } catch (e) {
           console.warn('⚠️ Failed to send customer confirm notification:', e?.message || e);
+        }
+      }
+
+      // Send notification to customer when order is completed
+      if (status && status.toLowerCase() === 'completed' && customerId) {
+        try {
+          const title = 'Order Completed';
+          // Keep message clear and generic; include order number
+          const message = `Your order #${id} has been completed. Thank you for choosing eLaba!`;
+
+          // Save notification to DB (in-app)
+          const { savedNotification } = await sendNotification({
+            accountId: customerId,
+            accountType: 'customer',
+            bookingId: id,
+            title,
+            message,
+          });
+
+          // Emit via socket to the customer room for real-time in-app notification
+          try {
+            const io = req.app.get('io');
+            const userRoom = `user_customer_${customerId}`;
+            if (io && savedNotification) {
+              io.to(userRoom).emit('newNotification', savedNotification);
+            }
+          } catch (e) {
+            console.warn('⚠️ Failed to emit completion notification via socket:', e?.message || e);
+          }
+
+          // Fan-out push notifications to all active customer device tokens
+          try {
+            const [tokenRows] = await db.query(
+              `SELECT token FROM device_tokens WHERE account_id = ? AND account_type = 'customer' AND is_active = 1`,
+              [customerId]
+            );
+            if (Array.isArray(tokenRows)) {
+              for (const row of tokenRows) {
+                try {
+                  await require('../service/notificationService').sendPushOnly({
+                    title,
+                    message,
+                    deviceToken: row.token,
+                  });
+                } catch (e) {
+                  // Errors handled in sendPushOnly (including invalid token cleanup)
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('⚠️ Failed to fan-out push for completion:', e?.message || e);
+          }
+        } catch (e) {
+          console.warn('⚠️ Failed to send customer completion notification:', e?.message || e);
         }
       }
     }
