@@ -45,7 +45,8 @@ exports.createPayment = async (req, res) => {
   }
 
   try {
-    const statusNorm = (status || 'unpaid').toString().toLowerCase() === 'paid' ? 'paid' : 'unpaid';
+  // payment status vocabulary: 'pending' | 'paid'
+  const statusNorm = (status || 'pending').toString().toLowerCase() === 'paid' ? 'paid' : 'pending';
     const sql = `INSERT INTO payment 
       (booking_id, customer_id, shop_id, service_id, payment_method, amount, status, date, transaction_id) 
       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)`;
@@ -75,8 +76,8 @@ exports.updatePaymentStatus = async (req, res) => {
   if (!status) return res.status(400).json({ message: "Status is required" });
 
   try {
-    // normalize status to only 'paid' | 'unpaid'
-    const nextStatus = (status || '').toString().toLowerCase() === 'paid' ? 'paid' : 'unpaid';
+  // normalize status to only 'paid' | 'pending'
+  const nextStatus = (status || '').toString().toLowerCase() === 'paid' ? 'paid' : 'pending';
     const sql = "UPDATE payment SET status = ? WHERE payment_id = ?";
     const [result] = await db.query(sql, [nextStatus, id]);
 

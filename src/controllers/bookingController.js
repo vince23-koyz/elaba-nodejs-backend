@@ -270,7 +270,7 @@ exports.updateBookingStatus = async (req, res) => {
                 : '';
             } catch (_) { formattedDate = ''; }
             title = 'Walk-in Booking Confirmed';
-            message = `Nakumpirma na ang walk-in booking mo${formattedDate ? ` para sa ${formattedDate}` : ''}. Dalhin na lang ang palalabhan mo sa mismong booking date.`;
+            message = `Your walk-in booking has been confirmed${formattedDate ? ` for ${formattedDate}` : ''}. Please bring your laundry on your scheduled date.`;
           } else {
             // Generic confirmation for non walk-in
             message = `Your booking #${id} has been confirmed.`;
