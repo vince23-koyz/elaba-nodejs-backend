@@ -205,6 +205,17 @@ exports.updateBookingStatus = async (req, res) => {
           at: new Date().toISOString(),
         });
       }
+      // Also notify the customer room for real-time updates in client apps
+      try {
+        if (io && io.to && customerId) {
+          io.to(`user_customer_${customerId}`).emit('bookingUpdated', {
+            bookingId: Number(id),
+            status,
+          });
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to emit bookingUpdated to customer room:', e?.message || e);
+      }
       // Send notification to admin if cancelled
       if (status && status.toLowerCase() === 'cancelled') {
         const adminInfo = await getAdminInfoByShop(shopId);
@@ -434,9 +445,24 @@ exports.updateBookingDate = async (req, res) => {
           at: new Date().toISOString(),
         });
       }
+      // Also notify the customer for real-time updates
+      try {
+        // Fetch customer_id for this booking
+        const [cRows] = await db.query('SELECT customer_id FROM booking WHERE booking_id = ? LIMIT 1', [id]);
+        const cId = cRows && cRows[0] ? cRows[0].customer_id : null;
+        if (io && io.to && cId) {
+          io.to(`user_customer_${cId}`).emit('bookingUpdated', {
+            bookingId: Number(id),
+            status,
+            booking_date,
+          });
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to emit bookingUpdated (date) to customer:', e?.message || e);
+      }
       // Send notification to admin for reschedule, include customer name, new date, and service name
       const adminInfo = await getAdminInfoByShop(shopId);
-      if (adminInfo && adminInfo.admin_id) {
+  if (adminInfo && adminInfo.admin_id) {
         // Fetch customer name and service name
         let customerName = '';
         let serviceName = '';
