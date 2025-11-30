@@ -16,7 +16,7 @@ exports.registerSuperAdmin = async (req, res) => {
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-
+  
     const sql = "INSERT INTO super_admin (username, email, password) VALUES (?, ?, ?)";
     const [result] = await db.query(sql, [username, email, hashedPassword]);
 
