@@ -44,6 +44,7 @@ app.set('io', io);
 app.use(cors({
   origin: [
     "http://localhost:3000",
+    "http://localhost:3001", // Add port 3001 for superadmin app
     "http://72.61.210.160",
     "http://72.61.210.160:3000",
   ],
