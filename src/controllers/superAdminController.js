@@ -176,12 +176,13 @@ exports.getDashboardStats = async (req, res) => {
     // Add recent shops
     if (recentShops && recentShops.length > 0) {
       recentShops.forEach(shop => {
+        const shopTs = shop.created_at || shop.createdAt || shop.registered_at || null;
         activities.push({
           action: `New shop registered: ${shop.name}`,
-          time: 'Recently',
+          time: shopTs ? formatTimeAgo(shopTs) : 'Unknown',
           color: '#3b82f6',
           type: 'shop',
-          timestamp: new Date() // Use current date since shop table doesn't have created_at
+          timestamp: shopTs ? shopTs : null
         });
       });
     }
