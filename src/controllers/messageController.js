@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { buildMarkReadQuery } = require("../utils/messageReadUtils");
 
 // ✅ Create new message
 const createMessage = async (req, res) => {
@@ -162,20 +163,22 @@ const getConversations = async (req, res) => {
 
 // ✅ Mark all messages as read (when user opens chat)
 const markMessagesAsRead = async (req, res) => {
-  const { senderId, receiverId, shopId } = req.body;
+  const { senderId, receiverId, shopId, senderType, receiverType } = req.body;
 
   if (!senderId || !receiverId || !shopId) {
     return res.status(400).json({ error: "Missing senderId, receiverId, or shopId" });
   }
 
   try {
-    const sql = `
-      UPDATE messages
-      SET is_read = 1
-      WHERE sender_id = ? AND receiver_id = ? AND shop_id = ? AND is_read = 0
-    `;
+    const { sql, params } = buildMarkReadQuery({
+      senderId,
+      receiverId,
+      shopId,
+      senderType,
+      receiverType,
+    });
 
-    const [result] = await db.query(sql, [senderId, receiverId, shopId]);
+    const [result] = await db.query(sql, params);
     res.json({ 
       message: "Messages marked as read", 
       affectedRows: result.affectedRows 

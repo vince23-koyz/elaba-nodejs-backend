@@ -7,12 +7,14 @@ const {
   getShopById,
   updateShop,
   deleteShop,
-  getShopByAdmin
+  getShopByAdmin,
+  rejectShop
 } = require('../controllers/shopController');
 
 const router = express.Router();
 
 router.post('/', upload.single('shopImage'), createShop);
+router.post('/:id/reject', rejectShop);
 router.get('/', getShops);
 router.get('/:id', getShopById);
 router.get('/admin/:admin_id', getShopByAdmin);

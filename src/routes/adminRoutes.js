@@ -1,12 +1,27 @@
 // src/routes/adminRoutes.js
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      code: 'TOO_MANY_ATTEMPTS',
+      message: 'Too many unsuccessful login attempts. Please wait a few minutes before trying again.'
+    });
+  }
+});
 
 // ADMIN ROUTES
 router.post('/register', adminController.registerAdmin);  // POST /api/admin/register
 router.post('/check-phone', adminController.checkPhone);  // POST /api/admin/check-phone (secure phone verification)
-router.post('/login', adminController.loginAdmin);        // POST /api/admin/login
+router.post('/login', adminLoginLimiter, adminController.loginAdmin);        // POST /api/admin/login
 router.post('/:id/change-password', adminController.changePassword); // POST /api/admin/:id/change-password
 
 // Password Recovery Routes

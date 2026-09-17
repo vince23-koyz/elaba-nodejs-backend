@@ -18,9 +18,94 @@ const paymentRoutes = require('./routes/paymentRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const notificationRoutes = require("./routes/notificationRoutes");
+const { sendPushToAccount } = require('./service/notificationService');
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const otpRoutes = require('./routes/otpRoutes');
 const imageRoutes = require('./routes/imageRoutes');
+const paymentController = require('./controllers/paymentController');
+
+async function getSenderDisplayName(senderType, senderId) {
+  if (!senderType || !senderId) {
+    return null;
+  }
+
+  try {
+    if (senderType === 'customer') {
+      const [rows] = await db.query(
+        'SELECT first_name, last_name FROM customer WHERE customer_id = ? LIMIT 1',
+        [senderId]
+      );
+      if (Array.isArray(rows) && rows[0]) {
+        const name = `${rows[0].first_name || ''} ${rows[0].last_name || ''}`.trim();
+        return name || null;
+      }
+    }
+
+    if (senderType === 'admin') {
+      const [rows] = await db.query(
+        'SELECT first_name, last_name FROM admin WHERE admin_id = ? LIMIT 1',
+        [senderId]
+      );
+      if (Array.isArray(rows) && rows[0]) {
+        const name = `${rows[0].first_name || ''} ${rows[0].last_name || ''}`.trim();
+        return name || null;
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Failed to resolve sender display name:', err?.message || err);
+  }
+
+  return null;
+}
+
+async function getShopName(shopId) {
+  if (!shopId) {
+    return null;
+  }
+
+  try {
+    const [rows] = await db.query(
+      'SELECT name FROM shop WHERE shop_id = ? LIMIT 1',
+      [shopId]
+    );
+    if (Array.isArray(rows) && rows[0]) {
+      return rows[0].name || null;
+    }
+  } catch (err) {
+    console.warn('⚠️ Failed to resolve shop name:', err?.message || err);
+  }
+
+  return null;
+}
+
+async function getShopLogo(shopId) {
+  if (!shopId) return null;
+  try {
+    const [rows] = await db.query(
+      'SELECT logo FROM shop WHERE shop_id = ? LIMIT 1',
+      [shopId]
+    );
+    if (Array.isArray(rows) && rows[0]) {
+      let logo = rows[0].logo || null;
+      if (logo) {
+        // If logo is a relative path (e.g. /uploads/...), prefix with PUBLIC_BASE_URL
+        const isAbsolute = /^https?:\/\//.test(logo);
+        if (!isAbsolute) {
+          const base = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+          if (logo.startsWith('/')) {
+            logo = `${base}${logo}`;
+          } else {
+            logo = `${base}/${logo}`;
+          }
+        }
+      }
+      return logo;
+    }
+  } catch (err) {
+    console.warn('⚠️ Failed to resolve shop logo:', err?.message || err);
+  }
+  return null;
+}
 
 
 const app = express();
@@ -42,16 +127,33 @@ app.set('io', io);
 
 // Middleware
 app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:3001", // Add port 3001 for superadmin app
-    "http://72.61.210.160",
-    "http://72.61.210.160:3000",
-  ],
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:3001",
+      "http://192.168.8.130:3000",
+      "http://72.61.210.160",
+      "http://72.61.210.160:3000",
+    ];
+
+    const isLanOrigin = typeof origin === "string" && /^http:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(?::\d+)?$/.test(origin);
+
+    if (!origin || allowedOrigins.includes(origin) || isLanOrigin) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 204
 }));
+// PayMongo signatures are calculated over the exact raw request body.
+app.post('/api/payments/webhook', bodyParser.raw({ type: 'application/json' }), paymentController.handlePayMongoWebhook);
 app.use(bodyParser.json());
 
 // Serve static files for uploaded images
@@ -130,24 +232,55 @@ io.on('connection', (socket) => {
   });
 
   // Listen for sending messages
-  socket.on('sendMessage', (messageData) => {
+  socket.on('sendMessage', async (messageData) => {
     console.log('📩 Message received:', messageData);
 
-    // Send to specific user rooms only to avoid duplicates
     const senderRoom = `user_${messageData.sender_type}_${messageData.sender_id}`;
     const receiverRoom = `user_${messageData.receiver_type}_${messageData.receiver_id}`;
-    
+    const customerId = messageData.sender_type === 'customer' ? messageData.sender_id : messageData.receiver_id;
+    const adminId = messageData.sender_type === 'admin' ? messageData.sender_id : messageData.receiver_id;
+    const conversationId = `shop_${messageData.shop_id}_customer_${customerId}_admin_${adminId}`;
+
     const messageWithTimestamp = {
       ...messageData,
       id: Date.now(),
       created_at: new Date().toISOString(),
     };
-    
-    // Send to sender (for confirmation)
+
     io.to(senderRoom).emit('receiveMessage', messageWithTimestamp);
-    
-    // Send to receiver
     io.to(receiverRoom).emit('receiveMessage', messageWithTimestamp);
+    io.to(conversationId).emit('receiveMessage', messageWithTimestamp);
+
+    try {
+      const senderName = await getSenderDisplayName(messageData.sender_type, messageData.sender_id);
+      const shopName = await getShopName(messageData.shop_id);
+      const shopLogo = await getShopLogo(messageData.shop_id);
+      const messageText = messageData.message_text;
+
+      await sendPushToAccount({
+        accountId: messageData.receiver_id,
+        accountType: messageData.receiver_type,
+        title: 'New message',
+        message: messageText,
+        data: {
+          sender_type: messageData.sender_type,
+          sender_id: String(messageData.sender_id),
+          sender_name: senderName || '',
+          receiver_type: String(messageData.receiver_type),
+          receiver_id: String(messageData.receiver_id),
+          shop_id: String(messageData.shop_id),
+          shop_name: shopName || '',
+          shop_image_url: shopLogo || '',
+          conversationId,
+          // include message id so native notifications can dedupe and remove read messages
+          message_id: String(messageWithTimestamp.id),
+        },
+        tag: `${messageData.receiver_type}_${messageData.receiver_id}_${conversationId}`,
+        chat: true,
+      });
+    } catch (pushErr) {
+      console.warn('⚠️ Failed to send push notification for message:', pushErr?.message || pushErr);
+    }
   });
 
   socket.on('disconnect', async (reason) => {

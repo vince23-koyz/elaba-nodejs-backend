@@ -1,10 +1,10 @@
 // controllers/shopController.js
 const db = require('../config/db');
-const { io } = require('../app');
+const { sendNotification } = require('../service/notificationService');
 
 // CREATE Shop
 exports.createShop = async (req, res) => {
-  const { name, address, website, owner_name, operation_hours, admin_id, status } = req.body;
+  const { name, address, website, owner_name, operation_hours, admin_id, status, pickup_delivery_enabled } = req.body;
 
   // For superadmin, admin_id is optional
   // Handle image upload - support Cloudinary (absolute URL) or local disk
@@ -22,6 +22,7 @@ exports.createShop = async (req, res) => {
   }
   // Default to 'pending' when creating a new shop unless explicitly provided
   const shopStatus = status || 'pending';
+  const pickupDeliveryEnabled = typeof pickup_delivery_enabled !== 'undefined' ? Number(pickup_delivery_enabled) : 0;
 
   try {
     let sql, params;
@@ -29,17 +30,17 @@ exports.createShop = async (req, res) => {
     if (admin_id) {
       sql = `
         INSERT INTO shop 
-          (name, address, website, owner_name, operation_hours, status, admin_id, logo)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (name, address, website, owner_name, operation_hours, status, admin_id, logo, pickup_delivery_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
-      params = [name, address, website, owner_name, operation_hours, shopStatus, admin_id, logo];
+      params = [name, address, website, owner_name, operation_hours, shopStatus, admin_id, logo, pickupDeliveryEnabled];
     } else {
       sql = `
         INSERT INTO shop 
-          (name, address, website, owner_name, operation_hours, status, logo)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (name, address, website, owner_name, operation_hours, status, logo, pickup_delivery_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `;
-      params = [name, address, website, owner_name, operation_hours, shopStatus, logo];
+      params = [name, address, website, owner_name, operation_hours, shopStatus, logo, pickupDeliveryEnabled];
     }
 
     const [result] = await db.query(sql, params);
@@ -54,6 +55,8 @@ exports.createShop = async (req, res) => {
 
     // Notify superadmins in real-time
     try {
+      const io = req.app && req.app.get ? req.app.get('io') : null;
+      if (!io) return;
       io.to('role_superadmin').emit('shopCreated', {
         shopId: result.insertId,
         status: shopStatus,
@@ -110,57 +113,147 @@ exports.getShopByAdmin = async (req, res) => {
   }
 };
 
+// REJECT pending shop and notify the shop owner
+exports.rejectShop = async (req, res) => {
+  const { id } = req.params;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+
+  try {
+    const [shopRows] = await db.query(
+      'SELECT shop_id, name, admin_id, status FROM shop WHERE shop_id = ? LIMIT 1',
+      [id]
+    );
+    const shop = shopRows?.[0];
+
+    if (!shop) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    await db.query(
+      'UPDATE shop SET status = ?, rejection_reason = ? WHERE shop_id = ?',
+      ['rejected', reason || null, id]
+    );
+
+    const message = reason
+      ? `Shop registration rejected for ${shop.name || 'your shop'}. Reason: ${reason}. Please review and reapply.`
+      : `Shop registration rejected for ${shop.name || 'your shop'}. Please review and reapply.`;
+
+    if (shop.admin_id) {
+      try {
+        const { savedNotification } = await sendNotification({
+          accountId: shop.admin_id,
+          accountType: 'admin',
+          title: 'Shop request rejected',
+          message
+        });
+
+        const io = req.app && req.app.get ? req.app.get('io') : null;
+        if (io && savedNotification) {
+          io.to(`user_admin_${shop.admin_id}`).emit('newNotification', savedNotification);
+        }
+      } catch (notificationError) {
+        console.error('Shop rejection notification error:', notificationError);
+      }
+    }
+
+    const io = req.app && req.app.get ? req.app.get('io') : null;
+    if (io) {
+      io.to('role_superadmin').emit('shopUpdated', {
+        shopId: Number(id),
+        status: 'rejected',
+        at: new Date().toISOString(),
+      });
+      if (shop.admin_id) {
+        io.to(`user_admin_${shop.admin_id}`).emit('shopStatusUpdated', {
+          shopId: Number(id),
+          adminId: Number(shop.admin_id),
+          status: 'rejected',
+          rejectionReason: reason || null,
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Shop rejected successfully',
+      status: 'rejected',
+      rejection_reason: reason || null
+    });
+  } catch (err) {
+    console.error('DB Error (rejectShop):', err);
+    res.status(500).json({ message: 'Failed to reject shop', error: err.message });
+  }
+};
+
 // UPDATE Shop
 exports.updateShop = async (req, res) => {
   const { id } = req.params;
-  const { name, address, website, owner_name, operation_hours, status } = req.body;
+  const { name, address, website, owner_name, operation_hours, status, pickup_delivery_enabled } = req.body;
 
   console.log('Updating shop ID:', id);
   console.log('Request body:', req.body);
   console.log('Has file:', !!req.file);
 
   try {
-    let sql, params;
+    const [existingRows] = await db.query('SELECT * FROM shop WHERE shop_id = ? LIMIT 1', [id]);
+    const existingShop = existingRows && existingRows[0] ? existingRows[0] : null;
 
-  // Handle image upload - use same column as RegisterShop (logo)
+    if (!existingShop) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    const normalizedPickupValue = typeof pickup_delivery_enabled !== 'undefined' ? Number(pickup_delivery_enabled) : undefined;
+    const updateFields = [];
+    const params = [];
+
+    const addField = (fieldName, value, fallbackValue) => {
+      const finalValue = typeof value === 'undefined' ? fallbackValue : value;
+
+      if (['name', 'address', 'owner_name', 'operation_hours'].includes(fieldName)) {
+        if (typeof finalValue === 'string' && finalValue.trim() === '') {
+          return;
+        }
+      }
+
+      if (typeof finalValue !== 'undefined' && finalValue !== null) {
+        updateFields.push(`${fieldName}=?`);
+        params.push(finalValue);
+      }
+    };
+
+    // Preserve existing shop meta when a frontend request only toggles pickup.
+    addField('name', name, existingShop.name);
+    addField('address', address, existingShop.address);
+    addField('website', website, existingShop.website);
+    addField('owner_name', owner_name, existingShop.owner_name);
+    addField('operation_hours', operation_hours, existingShop.operation_hours);
+
     if (req.file) {
-      // Build URL from Cloudinary or local disk
-      let logoPath = '';
       const pathOrUrl = req.file.path;
       const isHttp = typeof pathOrUrl === 'string' && /^https?:\/\//.test(pathOrUrl);
-      if (isHttp) {
-        logoPath = pathOrUrl;
-      } else {
-        const filename = req.file.filename || (pathOrUrl ? pathOrUrl.split(/[\\/]/).pop() : `shop_${Date.now()}.jpg`);
-        const baseUrl = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
-        logoPath = `${baseUrl}/uploads/shop-images/${filename}`;
-      }
-      console.log('Updating with image:', logoPath);
-      if (typeof status !== 'undefined') {
-   sql = `UPDATE shop 
-     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?, status=?
-     WHERE shop_id=?`;
-   params = [name, address, website, owner_name, operation_hours, logoPath, status, id];
-      } else {
-   sql = `UPDATE shop 
-     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, logo=?
-     WHERE shop_id=?`;
-   params = [name, address, website, owner_name, operation_hours, logoPath, id];
-      }
-    } else {
-      console.log('Updating without image');
-      if (typeof status !== 'undefined') {
-   sql = `UPDATE shop 
-     SET name=?, address=?, website=?, owner_name=?, operation_hours=?, status=?
-     WHERE shop_id=?`;
-   params = [name, address, website, owner_name, operation_hours, status, id];
-      } else {
-   sql = `UPDATE shop 
-     SET name=?, address=?, website=?, owner_name=?, operation_hours=?
-     WHERE shop_id=?`;
-   params = [name, address, website, owner_name, operation_hours, id];
-      }
+      const logoPath = isHttp
+        ? pathOrUrl
+        : `${process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`}/uploads/shop-images/${req.file.filename || (pathOrUrl ? pathOrUrl.split(/[\\/]/).pop() : `shop_${Date.now()}.jpg`)}`;
+      addField('logo', logoPath, existingShop.logo);
     }
+
+    addField('status', status, existingShop.status);
+    if (status === 'pending' && existingShop.status === 'rejected') {
+      updateFields.push('rejection_reason=?');
+      params.push(null);
+    }
+    if (typeof normalizedPickupValue !== 'undefined') {
+      updateFields.push('pickup_delivery_enabled=?');
+      params.push(normalizedPickupValue);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ message: 'No valid shop fields provided for update.' });
+    }
+
+    params.push(id);
+    const sql = `UPDATE shop SET ${updateFields.join(', ')} WHERE shop_id=?`;
 
     console.log('Executing SQL:', sql);
     console.log('With params:', params);
@@ -168,8 +261,10 @@ exports.updateShop = async (req, res) => {
     const [result] = await db.query(sql, params);
     console.log('Update result:', result);
 
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'Shop not found' });
-    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
     const responseData = { message: 'Shop updated successfully' };
     if (req.file) {
       responseData.logo = `/uploads/shop-images/${req.file.filename}`;
@@ -177,17 +272,34 @@ exports.updateShop = async (req, res) => {
     if (typeof status !== 'undefined') {
       responseData.status = status;
     }
-    
+    if (typeof normalizedPickupValue !== 'undefined') {
+      responseData.pickup_delivery_enabled = normalizedPickupValue;
+    }
+    if (typeof name !== 'undefined') {
+      responseData.name = name;
+    }
+
     console.log('Sending response:', responseData);
     res.json(responseData);
 
-    // Emit update for superadmin dashboards
     try {
-      io.to('role_superadmin').emit('shopUpdated', {
-        shopId: Number(id),
-        status: typeof status !== 'undefined' ? status : undefined,
-        at: new Date().toISOString(),
-      });
+      const io = req.app && req.app.get ? req.app.get('io') : null;
+      if (io) {
+        io.to('role_superadmin').emit('shopUpdated', {
+          shopId: Number(id),
+          status: typeof status !== 'undefined' ? status : undefined,
+          at: new Date().toISOString(),
+        });
+
+        if (typeof status !== 'undefined' && existingShop.admin_id) {
+          io.to(`user_admin_${existingShop.admin_id}`).emit('shopStatusUpdated', {
+            shopId: Number(id),
+            adminId: Number(existingShop.admin_id),
+            status,
+            at: new Date().toISOString(),
+          });
+        }
+      }
     } catch (emitErr) {
       console.error('Socket emit error (shopUpdated):', emitErr);
     }
@@ -212,6 +324,14 @@ exports.deleteShop = async (req, res) => {
 
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Shop not found' });
     res.json({ message: 'Shop deleted successfully' });
+
+    const io = req.app && req.app.get ? req.app.get('io') : null;
+    if (io) {
+      io.to('role_superadmin').emit('shopDeleted', {
+        shopId: Number(id),
+        at: new Date().toISOString(),
+      });
+    }
   } catch (err) {
     console.error("DB Error (deleteShop):", err);
     res.status(500).json({ message: 'Database error', error: err.message });

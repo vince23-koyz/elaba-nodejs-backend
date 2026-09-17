@@ -1,5 +1,73 @@
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const db = require('../config/db'); // promise-based pool
+const { normalizePhoneNumber } = require('../utils/phoneUtils');
+
+const failedLoginAttempts = new Map();
+const FAILED_LOGIN_LIMIT = 5;
+const FAILED_LOGIN_WINDOW_MS = 10 * 60 * 1000;
+
+const cleanupExpiredFailedLoginRecords = () => {
+  const now = Date.now();
+  for (const [phoneKey, record] of failedLoginAttempts.entries()) {
+    if (record.lockedUntil <= now) {
+      failedLoginAttempts.delete(phoneKey);
+    }
+  }
+};
+
+const getFailedLoginRecord = (normalizedPhone) => {
+  cleanupExpiredFailedLoginRecords();
+
+  const existing = failedLoginAttempts.get(normalizedPhone);
+  if (!existing) {
+    return null;
+  }
+
+  if (existing.lockedUntil <= Date.now()) {
+    failedLoginAttempts.delete(normalizedPhone);
+    return null;
+  }
+
+  return existing;
+};
+
+const incrementFailedLoginAttempt = (normalizedPhone) => {
+  cleanupExpiredFailedLoginRecords();
+
+  const existing = failedLoginAttempts.get(normalizedPhone);
+  const now = Date.now();
+
+  if (!existing) {
+    const record = {
+      failedAttempts: 1,
+      lockedUntil: now + FAILED_LOGIN_WINDOW_MS,
+    };
+    failedLoginAttempts.set(normalizedPhone, record);
+    return record;
+  }
+
+  if (existing.lockedUntil <= now) {
+    const record = {
+      failedAttempts: 1,
+      lockedUntil: now + FAILED_LOGIN_WINDOW_MS,
+    };
+    failedLoginAttempts.set(normalizedPhone, record);
+    return record;
+  }
+
+  const updated = {
+    failedAttempts: existing.failedAttempts + 1,
+    lockedUntil: existing.lockedUntil,
+  };
+
+  failedLoginAttempts.set(normalizedPhone, updated);
+  return updated;
+};
+
+const resetFailedLoginAttempt = (normalizedPhone) => {
+  failedLoginAttempts.delete(normalizedPhone);
+};
 
 // REGISTER ADMIN
 exports.registerAdmin = async (req, res) => {
@@ -34,24 +102,54 @@ exports.loginAdmin = async (req, res) => {
   const { phone_number, password } = req.body;
 
   try {
+    const normalizedPhone = normalizePhoneNumber(phone_number);
+    const failedRecord = getFailedLoginRecord(normalizedPhone);
+
+    if (failedRecord && failedRecord.failedAttempts >= FAILED_LOGIN_LIMIT) {
+      return res.status(429).json({
+        success: false,
+        code: 'TOO_MANY_ATTEMPTS',
+        message: 'Too many unsuccessful login attempts. Please wait a few minutes before trying again.'
+      });
+    }
+
     const sql = 'SELECT * FROM admin WHERE phone_number = ?';
     const [results] = await db.query(sql, [phone_number]);
 
     if (results.length === 0) {
-      return res.status(400).json({ success: false, message: 'Phone number not registered.' });
+      incrementFailedLoginAttempt(normalizedPhone);
+      return res.status(401).json({
+        success: false,
+        code: 'INVALID_CREDENTIALS',
+        message: 'The phone number or password you entered is incorrect. Please check your credentials and try again.'
+      });
     }
 
     const admin = results[0];
     const isMatch = await bcrypt.compare(password, admin.password);
 
     if (!isMatch) {
-      return res.status(400).json({ success: false, message: 'Incorrect password.' });
+      const updatedRecord = incrementFailedLoginAttempt(normalizedPhone);
+      if (updatedRecord.failedAttempts >= FAILED_LOGIN_LIMIT) {
+        return res.status(429).json({
+          success: false,
+          code: 'TOO_MANY_ATTEMPTS',
+          message: 'Too many unsuccessful login attempts. Please wait a few minutes before trying again.'
+        });
+      }
+
+      return res.status(401).json({
+        success: false,
+        code: 'INVALID_CREDENTIALS',
+        message: 'The phone number or password you entered is incorrect. Please check your credentials and try again.'
+      });
     }
 
+    resetFailedLoginAttempt(normalizedPhone);
     res.json({ success: true, message: 'Login successful!', admin_id: admin.admin_id });
   } catch (err) {
     console.error("DB Error (loginAdmin):", err);
-    res.status(500).json({ message: 'Database error', error: err.message });
+    res.status(500).json({ success: false, message: 'Database error', error: err.message });
   }
 };
 
@@ -272,8 +370,14 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate and store a six-digit OTP for server-side verification.
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    await db.query('DELETE FROM otp_verification WHERE phone_number = ?', [matchedPhone]);
+    await db.query(
+      'INSERT INTO otp_verification (phone_number, otp_code, expires_at) VALUES (?, ?, ?)',
+      [matchedPhone, otp, expiresAt]
+    );
     console.log(`🔐 Generated OTP: ${otp} for admin: ${admin.first_name} ${admin.last_name}`);
 
     // Return success with OTP (in real app, this would send SMS)
@@ -340,6 +444,7 @@ exports.verifyOTP = async (req, res) => {
     console.log(`📱 Phone variations to try:`, uniqueVariations);
 
     let admin = null;
+    let matchedPhone = null;
     
     // Try each phone variation
     for (const phoneVar of uniqueVariations) {
@@ -348,6 +453,7 @@ exports.verifyOTP = async (req, res) => {
       
       if (results.length > 0) {
         admin = results[0];
+        matchedPhone = results[0].phone_number;
         console.log(`✅ Found admin for OTP verification: "${phoneVar}"`);
         break;
       }
@@ -369,9 +475,29 @@ exports.verifyOTP = async (req, res) => {
       });
     }
 
-    console.log(`✅ OTP format valid for admin: ${admin.first_name} ${admin.last_name}`);
+    const [otpRows] = await db.query(
+      'SELECT otp_code, expires_at FROM otp_verification WHERE phone_number = ? AND otp_code = ? ORDER BY created_at DESC LIMIT 1',
+      [matchedPhone, otp]
+    );
 
-    // For development, accept any valid 6-digit OTP
+    if (otpRows.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid OTP. Please enter the code shown in the server console or request a new code.'
+      });
+    }
+
+    if (new Date(otpRows[0].expires_at) < new Date()) {
+      await db.query('DELETE FROM otp_verification WHERE phone_number = ?', [matchedPhone]);
+      return res.status(400).json({
+        success: false,
+        message: 'OTP expired. Please request a new code.'
+      });
+    }
+
+    await db.query('DELETE FROM otp_verification WHERE phone_number = ?', [matchedPhone]);
+    console.log(`✅ OTP verified for admin: ${admin.first_name} ${admin.last_name}`);
+
     res.json({ 
       success: true, 
       message: 'OTP verified successfully. You can now reset your password.',

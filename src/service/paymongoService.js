@@ -168,6 +168,76 @@ class PayMongoService {
     return response.data.data;
   }
 
+  async _getPaymentForIntent(paymentIntentId) {
+    const response = await this.secretClient.get('/payments', { params: { limit: 100 } });
+    const payments = response.data?.data;
+    return Array.isArray(payments)
+      ? payments.find((payment) => payment?.attributes?.payment_intent_id === paymentIntentId) || null
+      : null;
+  }
+
+  _extractPayMongoPaymentId(resource) {
+    const attributes = resource?.attributes || {};
+    const payments = attributes.payments || resource?.payments || [];
+    const payment = Array.isArray(payments) ? payments[0] : payments;
+    const paymentIntent = attributes.payment_intent;
+    const intentPayments = paymentIntent?.attributes?.payments || [];
+    const intentPayment = Array.isArray(intentPayments) ? intentPayments[0] : intentPayments;
+    return payment?.id || payment?.data?.id || intentPayment?.id || intentPayment?.data?.id ||
+      (typeof paymentIntent === 'string' ? null : paymentIntent?.id || paymentIntent?.data?.id) || null;
+  }
+
+  async _resolveCheckoutPaymentId(session) {
+    const directPaymentId = this._extractPayMongoPaymentId(session);
+    if (directPaymentId) {
+      console.log(`[PayMongo] Resolved checkout payment ID ${directPaymentId} from checkout session`);
+      return directPaymentId;
+    }
+
+    const paymentIntent = session?.attributes?.payment_intent;
+    const paymentIntentId = typeof paymentIntent === 'string'
+      ? paymentIntent
+      : paymentIntent?.id || paymentIntent?.data?.id;
+    if (!paymentIntentId) return null;
+
+    try {
+      const intent = await this._getPaymentIntent(paymentIntentId);
+      const embeddedPaymentId = this._extractPayMongoPaymentId(intent);
+      if (embeddedPaymentId) {
+        console.log(`[PayMongo] Resolved checkout payment ID ${embeddedPaymentId} from payment intent ${paymentIntentId}`);
+        return embeddedPaymentId;
+      }
+      const payment = await this._getPaymentForIntent(paymentIntentId);
+      const paymentId = payment?.id || null;
+      console.log(`[PayMongo] Payment collection lookup for ${paymentIntentId}: ${paymentId || 'not found'}`);
+      return paymentId;
+    } catch (error) {
+      console.warn('[PayMongo] Unable to resolve checkout payment ID:', error.response?.data || error.message);
+      return null;
+    }
+  }
+
+  async resolvePaymentId(referenceId) {
+    if (!referenceId || !this.isRealMode()) return null;
+    if (String(referenceId).startsWith('pay_')) return referenceId;
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      try {
+        const paymentId = String(referenceId).startsWith('cs_')
+          ? await this._resolveCheckoutPaymentId(await this._getCheckoutSession(referenceId))
+          : String(referenceId).startsWith('pi_')
+            ? await this._resolveCheckoutPaymentId({ attributes: { payment_intent: referenceId } })
+            : null;
+        if (paymentId) return paymentId;
+      } catch (error) {
+        console.warn(`[PayMongo] Payment ID resolution attempt ${attempt} failed:`, error.response?.data || error.message);
+      }
+      if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    console.warn(`[PayMongo] No pay_ ID found for reference ${referenceId} after 5 attempts`);
+    return null;
+  }
+
   // ---------------- PUBLIC API ----------------
   async createGCashPayment(amount, description, customerInfo, bookingId) {
     if (!amount || amount <= 0) return { success: false, error: 'Invalid amount' };
@@ -195,6 +265,7 @@ class PayMongoService {
           success: true,
           data: {
             paymentIntentId: session.id, // we reuse this name for polling
+            paymongoPaymentId: this._extractPayMongoPaymentId(session),
             paymentMethodId: '',
             redirectUrl: session.attributes?.checkout_url || session.attributes?.checkout_url_with_content_security_policy || '',
             clientKey: '',
@@ -222,6 +293,7 @@ class PayMongoService {
         success: true,
         data: {
           paymentIntentId: intent.id,
+          paymongoPaymentId: this._extractPayMongoPaymentId(attached),
           paymentMethodId: paymentMethod.id,
             redirectUrl: attrs.next_action?.redirect?.url || '',
           clientKey: attrs.client_key,
@@ -251,8 +323,10 @@ class PayMongoService {
         try {
           const session = await this._getCheckoutSession(paymentIntentId);
           const attrs = session?.attributes || {};
+          const sessionPayment = Array.isArray(attrs.payments) ? attrs.payments[0] : attrs.payments;
+          const sessionPaymentStatus = sessionPayment?.attributes?.status;
           let status = 'processing';
-          if (attrs.status === 'paid') status = 'succeeded';
+          if (attrs.status === 'paid' || sessionPaymentStatus === 'paid') status = 'succeeded';
           else if (attrs.status === 'expired' || attrs.status === 'cancelled' || attrs.status === 'canceled') status = 'canceled';
           const piStatus = attrs.payment_intent?.attributes?.status || attrs.payment_intent_status;
           if (piStatus === 'succeeded') status = 'succeeded';
@@ -260,7 +334,11 @@ class PayMongoService {
           if (status === 'processing') {
             status = this._checkoutSessionsStatus.get(paymentIntentId) || 'processing';
           }
-          return { success: true, status, data: session };
+          const paymongoPaymentId = status === 'succeeded'
+            ? await this._resolveCheckoutPaymentId(session)
+            : null;
+          console.log(`[PayMongo] Checkout session ${paymentIntentId}: status=${status} payment=${paymongoPaymentId || 'null'}`);
+          return { success: true, status, paymongoPaymentId, data: session };
         } catch (err) {
           console.warn('[PayMongo] Failed to fetch checkout session from API, falling back to local status:', err.response?.data || err.message);
           const status = this._checkoutSessionsStatus.get(paymentIntentId) || 'processing';
@@ -269,7 +347,11 @@ class PayMongoService {
       } else {
         try {
           const intent = await this._getPaymentIntent(paymentIntentId);
-          return { success: true, status: intent.attributes.status, data: intent };
+          const status = intent.attributes.status;
+          const paymongoPaymentId = status === 'succeeded'
+            ? await this._resolveCheckoutPaymentId({ attributes: { payment_intent: paymentIntentId } })
+            : null;
+          return { success: true, status, paymongoPaymentId, data: intent };
         } catch (err) {
           console.error('[PayMongo] Error fetching payment intent (test):', err.response?.data || err.message);
           return { success: false, error: 'Failed to check payment status' };
@@ -278,10 +360,76 @@ class PayMongoService {
     }
     try {
       const intent = await this._getPaymentIntent(paymentIntentId);
-      return { success: true, status: intent.attributes.status, data: intent };
+      const status = intent.attributes.status;
+      const paymongoPaymentId = status === 'succeeded'
+        ? await this._resolveCheckoutPaymentId({ attributes: { payment_intent: paymentIntentId } })
+        : null;
+      return { success: true, status, paymongoPaymentId, data: intent };
     } catch (error) {
       console.error('PayMongo real checkPaymentStatus error:', error.response?.data || error.message);
       return { success: false, error: error.response?.data?.errors?.[0]?.detail || 'Failed to check payment status' };
+    }
+  }
+
+  async createRefund({ paymentId, amount, reason = 'others', notes }) {
+    if (this.mode !== 'test') {
+      return { success: false, error: 'PayMongo refunds are enabled only in test mode' };
+    }
+    if (!this.isRealMode()) {
+      return { success: false, error: 'PayMongo test keys not configured' };
+    }
+    if (!/^pay_[A-Za-z0-9_]+$/.test(String(paymentId || ''))) {
+      return { success: false, error: 'A valid PayMongo payment ID is required' };
+    }
+    const amountInPesos = Number(amount);
+    if (!Number.isFinite(amountInPesos) || amountInPesos <= 0) {
+      return { success: false, error: 'Refund amount must be greater than zero' };
+    }
+
+    try {
+      const response = await this.secretClient.post('/refunds', {
+        data: {
+          attributes: {
+            amount: Math.round(amountInPesos * 100),
+            payment_id: paymentId,
+            reason,
+            ...(notes ? { notes } : {})
+          }
+        }
+      });
+      const refund = response.data?.data;
+      const status = refund?.attributes?.status;
+      if (!refund?.id || !status) {
+        return { success: false, error: 'Malformed PayMongo refund response' };
+      }
+      return { success: true, refund };
+    } catch (error) {
+      console.error('PayMongo refund error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.errors?.[0]?.detail || 'PayMongo refund request failed'
+      };
+    }
+  }
+
+  async getRefund(refundId) {
+    if (this.mode !== 'test') {
+      return { success: false, error: 'PayMongo refunds are enabled only in test mode' };
+    }
+    if (!this.isRealMode()) return { success: false, error: 'PayMongo test keys not configured' };
+    if (!/^[A-Za-z0-9_-]+$/.test(String(refundId || ''))) {
+      return { success: false, error: 'A valid PayMongo refund ID is required' };
+    }
+    try {
+      const response = await this.secretClient.get(`/refunds/${refundId}`);
+      const refund = response.data?.data;
+      if (!refund?.id || !refund?.attributes?.status) {
+        return { success: false, error: 'Malformed PayMongo refund response' };
+      }
+      return { success: true, refund };
+    } catch (error) {
+      console.error('PayMongo refund status error:', error.response?.data || error.message);
+      return { success: false, error: 'Unable to retrieve PayMongo refund status' };
     }
   }
 

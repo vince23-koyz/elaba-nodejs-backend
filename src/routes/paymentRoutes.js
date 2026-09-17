@@ -4,6 +4,7 @@ const router = express.Router();
 const paymentController = require("../controllers/paymentController");
 
 router.get("/", paymentController.getPayments);
+router.get('/refunds', paymentController.getRefunds);
 router.get("/:id", paymentController.getPaymentById);
 router.post("/", paymentController.createPayment);
 router.put("/:id/status", paymentController.updatePaymentStatus);
@@ -13,6 +14,9 @@ router.get('/shop/:shopId/total', paymentController.getShopSales);
 // PayMongo GCash Payment Routes - Temporarily disabled, returns 503 status
 router.post("/gcash/create", paymentController.createGCashPayment);
 router.get("/gcash/status/:paymentIntentId", paymentController.checkPaymentStatus);
+router.post('/refunds', paymentController.createBookingRefund);
+router.post('/refunds/:refundId/process', paymentController.processExistingRefund);
+router.get('/refunds/:refundId/status', paymentController.syncRefundStatus);
 
 // Checkout Sessions redirect callbacks (sandbox/test)
 router.get('/gcash/checkout/success', paymentController.checkoutSuccess);

@@ -1,14 +1,31 @@
 // src/routes/customerRoutes.js
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const multer = require('multer');
 const path = require('path');
 const router = express.Router();
 const customerController = require('../controllers/customerController');
 const upload = require('../config/multer');
 
+const customerLoginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      code: 'TOO_MANY_ATTEMPTS',
+      message: 'Too many unsuccessful login attempts. Please wait a few minutes before trying again.'
+    });
+  }
+});
+
 router.post('/', customerController.registerCustomer);
 router.post('/check-phone', customerController.checkPhone);  // POST /api/customers/check-phone (secure phone verification)
-router.post('/login', customerController.loginCustomer);
+router.post('/forgot-password', customerController.forgotPassword);
+router.post('/verify-otp', customerController.verifyOTP);
+router.post('/login', customerLoginLimiter, customerController.loginCustomer);
 router.get('/', customerController.getAllCustomers); // GET all customers (for dashboard)
 router.get('/:customerId', customerController.getCustomer);
 router.put('/:customerId', customerController.updateCustomer);

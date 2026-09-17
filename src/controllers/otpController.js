@@ -3,6 +3,34 @@ const OtpService = require('../service/otpService');
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 
+const buildPhoneVariations = (phoneNumber) => {
+  const cleanPhone = (phoneNumber || '').replace(/\D/g, '');
+  const variations = [
+    phoneNumber?.trim(),
+    cleanPhone,
+  ].filter(Boolean);
+
+  if (cleanPhone.startsWith('63') && cleanPhone.length >= 12) {
+    const withoutCountryCode = cleanPhone.substring(2);
+    variations.push(withoutCountryCode);
+    variations.push('0' + withoutCountryCode);
+  }
+
+  if (cleanPhone.startsWith('09') && cleanPhone.length >= 11) {
+    variations.push('+63' + cleanPhone.substring(1));
+    variations.push('63' + cleanPhone.substring(1));
+    variations.push(cleanPhone.substring(1));
+  }
+
+  if (cleanPhone.startsWith('9') && !cleanPhone.startsWith('09') && cleanPhone.length >= 10) {
+    variations.push('0' + cleanPhone);
+    variations.push('+63' + cleanPhone);
+    variations.push('63' + cleanPhone);
+  }
+
+  return [...new Set(variations)];
+};
+
 const OtpController = {
   // 📨 Step 1: Send OTP (for Registration)
   sendOtp: async (req, res) => {
@@ -55,16 +83,18 @@ const OtpController = {
       if (!phone_number || !new_password)
         return res.status(400).json({ message: 'Phone number and new password required' });
 
+      const phoneVariations = buildPhoneVariations(phone_number);
       const hashedPassword = await bcrypt.hash(new_password, 10);
 
+      const customerPlaceholders = phoneVariations.map(() => '?').join(',');
       const [updateCustomer] = await db.query(
-        'UPDATE customer SET password_hash = ? WHERE phone_number = ?',
-        [hashedPassword, phone_number]
+        `UPDATE customer SET password_hash = ? WHERE phone_number IN (${customerPlaceholders})`,
+        [hashedPassword, ...phoneVariations]
       );
 
       const [updateAdmin] = await db.query(
-        'UPDATE admin SET password = ? WHERE phone_number = ?',
-        [hashedPassword, phone_number]
+        `UPDATE admin SET password = ? WHERE phone_number IN (${customerPlaceholders})`,
+        [hashedPassword, ...phoneVariations]
       );
 
       if (updateCustomer.affectedRows === 0 && updateAdmin.affectedRows === 0)

@@ -78,7 +78,25 @@ exports.getNotifications = async (req, res) => {
 
   try {
     const [rows] = await db.query(
-      "SELECT * FROM notifications WHERE account_id = ? AND account_type = ? ORDER BY created_at DESC",
+      `SELECT n.*
+       FROM notifications n
+       LEFT JOIN booking b ON b.booking_id = n.booking_id
+       WHERE n.account_id = ?
+         AND n.account_type = ?
+         AND NOT (n.account_type = 'customer' AND LOWER(TRIM(n.title)) = 'reschedule request submitted')
+         AND NOT (
+           n.account_type = 'customer'
+           AND LOWER(TRIM(n.title)) = 'booking declined'
+           AND (
+             LOWER(COALESCE(b.status, '')) = 'cancelled'
+             OR EXISTS (
+               SELECT 1
+               FROM booking_reschedule br
+               WHERE br.booking_id = n.booking_id
+             )
+           )
+         )
+       ORDER BY n.created_at DESC`,
       [accountId, accountType]
     );
     res.json(rows);
@@ -153,6 +171,14 @@ exports.sendNotificationToCustomer = async (req, res) => {
 
   if (!customerId || !bookingId || !title || !message) {
     return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  if (title.trim().toLowerCase() === 'reschedule request submitted') {
+    return res.status(200).json({
+      success: true,
+      skipped: true,
+      message: 'Submitted reschedule notifications are disabled',
+    });
   }
 
   try {

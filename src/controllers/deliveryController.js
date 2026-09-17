@@ -4,12 +4,33 @@ const { sendNotification } = require('../service/notificationService');
 // Allowed delivery status states for pickup/delivery flow
 const ALLOWED_STATUS = new Set([
   'pending',
-  'confirmed',
-  'ready', // ready for pickup or ready to dispatch
+  'out_for_pickup',
+  'picked_up',
+  'at_shop',
+  'ready_for_delivery',
   'out_for_delivery', // courier en route
-  'completed',
+  'delivered',
   'cancelled',
 ]);
+
+const NOTIFIABLE_DELIVERY_STATUS = new Set([
+  'out_for_pickup',
+  'picked_up',
+  'at_shop',
+  'ready_for_delivery',
+  'out_for_delivery',
+  'delivered',
+]);
+
+const DELIVERY_NOTIFICATION_TITLES = [
+  'Booking Confirmed',
+  'Out for Pickup',
+  'Laundry Picked Up',
+  'Laundry At Shop',
+  'Laundry Ready for Delivery',
+  'Out for Delivery',
+  'Laundry Delivered',
+];
 
 exports.createDelivery = async (req, res) => {
   const { 
@@ -23,8 +44,11 @@ exports.createDelivery = async (req, res) => {
     service_id 
   } = req.body;
 
-  // Validate required fields
-  if (!pickup_address || !delivery_address || !delivery_time || !status || !booking_id || !customer_id || !shop_id || !service_id) {
+  const normalizedDeliveryAddress = delivery_address ?? null;
+  const normalizedDeliveryTime = delivery_time ?? null;
+
+  // Validate required fields (delivery_address and delivery_time can be null for pending pickups)
+  if (!pickup_address || !status || !booking_id || !customer_id || !shop_id || !service_id) {
     return res.status(400).json({ message: 'All fields are required' });
   }
 
@@ -45,14 +69,6 @@ exports.createDelivery = async (req, res) => {
     // Optional: ensure relations match
     const b = bookingRows[0];
     if (Number(b.shop_id) !== Number(shop_id) || Number(b.customer_id) !== Number(customer_id)) {
-    const ALLOWED_STATUS = new Set([
-      'pending',
-      'confirmed',
-      'ready', // ready for pickup or ready to dispatch
-      'out_for_delivery', // courier en route
-      'completed',
-      'cancelled',
-    ]);
       return res.status(400).json({ message: 'Mismatch between booking and provided shop/customer' });
     }
 
@@ -62,8 +78,8 @@ exports.createDelivery = async (req, res) => {
 
     const [result] = await db.query(sql, [
       pickup_address, 
-      delivery_address, 
-      delivery_time, 
+      normalizedDeliveryAddress, 
+      normalizedDeliveryTime, 
       status, 
       booking_id, 
       customer_id, 
@@ -115,7 +131,7 @@ exports.getDeliveries = async (req, res) => {
 
     let sql = `
       SELECT d.*, 
-             b.booking_type, b.booking_date, b.total_amount,
+             b.booking_type, b.booking_date, b.pickup_date, b.status AS booking_status, b.total_amount,
              c.first_name AS customer_first_name, c.last_name AS customer_last_name,
              s.name AS shop_name,
              srv.offers AS service_name
@@ -131,7 +147,7 @@ exports.getDeliveries = async (req, res) => {
     if (customer_id) { where.push('d.customer_id = ?'); params.push(customer_id); }
     if (booking_id) { where.push('d.booking_id = ?'); params.push(booking_id); }
     if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
-    sql += ` ORDER BY d.delivery_time DESC`;
+    sql += ` ORDER BY COALESCE(d.delivery_time, b.pickup_date) DESC`;
 
     const [results] = await db.query(sql, params);
     res.json(results);
@@ -148,7 +164,7 @@ exports.getDeliveryById = async (req, res) => {
   try {
     const sql = `
       SELECT d.*, 
-             b.booking_type, b.booking_date, b.total_amount,
+             b.booking_type, b.booking_date, b.pickup_date, b.total_amount,
              c.first_name AS customer_first_name, c.last_name AS customer_last_name,
              s.name AS shop_name,
              srv.offers AS service_name
@@ -174,7 +190,10 @@ exports.updateDelivery = async (req, res) => {
   const { id } = req.params;
   const { pickup_address, delivery_address, delivery_time, status, booking_id, customer_id, shop_id, service_id } = req.body;
 
-  if (!pickup_address || !delivery_address || !delivery_time || !status || !booking_id || !customer_id || !shop_id || !service_id) {
+  const normalizedDeliveryAddress = delivery_address ?? null;
+  const normalizedDeliveryTime = delivery_time ?? null;
+
+  if (!pickup_address || !status || !booking_id || !customer_id || !shop_id || !service_id) {
     return res.status(400).json({ message: 'All fields are required' });
   }
 
@@ -192,8 +211,8 @@ exports.updateDelivery = async (req, res) => {
 
     const [result] = await db.query(sql, [
       pickup_address, 
-      delivery_address, 
-      delivery_time, 
+      normalizedDeliveryAddress, 
+      normalizedDeliveryTime, 
       status, 
       booking_id, 
       customer_id, 
@@ -247,28 +266,18 @@ exports.updateDeliveryStatus = async (req, res) => {
 
   try {
     // Fetch delivery for context
-    const [rows] = await db.query('SELECT * FROM delivery WHERE delivery_id = ? LIMIT 1', [id]);
+    const [rows] = await db.query(`
+      SELECT d.*, s.name AS shop_name
+      FROM delivery d
+      LEFT JOIN shop s ON s.shop_id = d.shop_id
+      WHERE d.delivery_id = ?
+      LIMIT 1
+    `, [id]);
     if (!rows || rows.length === 0) return res.status(404).json({ message: 'Delivery not found' });
     const d = rows[0];
 
     const [result] = await db.query('UPDATE delivery SET status = ? WHERE delivery_id = ?', [normalizedStatus, id]);
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Delivery not found' });
-
-    // Optionally keep booking status in sync for pickup-style bookings
-    // Only set to some meaningful mapping
-    try {
-      const statusMap = {
-        ready: 'ready',
-        out_for_delivery: 'in_transit',
-        completed: 'completed',
-      };
-      const mapped = statusMap[normalizedStatus];
-      if (mapped) {
-        await db.query('UPDATE booking SET status = ? WHERE booking_id = ?', [mapped, d.booking_id]);
-      }
-    } catch (e) {
-      console.warn('⚠️ Failed to sync booking status from delivery:', e?.message || e);
-    }
 
     // Emit socket event and send notification to customer
     try {
@@ -293,8 +302,8 @@ exports.updateDeliveryStatus = async (req, res) => {
         });
       }
 
-      // Send push + in-app notification to customer depending on status
-      try {
+      // Notify only on major delivery milestones; every status still reaches the UI via socket.
+      if (NOTIFIABLE_DELIVERY_STATUS.has(normalizedStatus)) try {
         const [tokRows] = await db.query(
           `SELECT dt.token as device_token FROM device_tokens dt WHERE dt.account_id = ? AND dt.account_type = 'customer' AND dt.is_active = 1 LIMIT 1`,
           [d.customer_id]
@@ -303,25 +312,39 @@ exports.updateDeliveryStatus = async (req, res) => {
 
         let title = 'Delivery Update';
         let message = 'Your delivery status has been updated.';
-        if (normalizedStatus === 'ready') {
-          title = 'Laundry Ready for Pickup';
-          message = `Your order #${d.booking_id} is ready for pickup.`;
+        if (normalizedStatus === 'out_for_pickup') {
+          title = 'Out for Pickup';
+          message = `Pickup for booking #${d.booking_id} is on the way.`;
+        } else if (normalizedStatus === 'picked_up') {
+          title = 'Laundry Picked Up';
+          message = `Your laundry for booking #${d.booking_id} has been picked up.`;
+        } else if (normalizedStatus === 'at_shop') {
+          title = 'Laundry At Shop';
+          message = `Your laundry for booking #${d.booking_id} has arrived at the shop.`;
+        } else if (normalizedStatus === 'ready_for_delivery') {
+          title = 'Laundry Ready for Delivery';
+          message = `Your booking #${d.booking_id} is ready for delivery.`;
         } else if (normalizedStatus === 'out_for_delivery') {
           title = 'Out for Delivery';
-          message = `Your order #${d.booking_id} is now out for delivery.`;
-        } else if (normalizedStatus === 'completed') {
-          title = 'Delivery Completed';
-          message = `Your order #${d.booking_id} has been completed.`;
+          message = `Your booking #${d.booking_id} is now out for delivery.`;
+        } else if (normalizedStatus === 'delivered') {
+          title = 'Laundry Delivered';
+          message = `Your booking #${d.booking_id} at ${d.shop_name || 'the shop'} has been delivered.`;
         }
 
-        await sendNotification({
+        const { savedNotification } = await sendNotification({
           accountId: d.customer_id,
           accountType: 'customer',
           bookingId: d.booking_id,
           title,
           message,
           deviceToken,
+          replaceExisting: true,
+          existingTitles: DELIVERY_NOTIFICATION_TITLES,
         });
+        if (savedNotification && io?.to) {
+          io.to(`user_customer_${d.customer_id}`).emit('newNotification', savedNotification);
+        }
       } catch (e) {
         console.warn('⚠️ Failed to send delivery status notification:', e?.message || e);
       }

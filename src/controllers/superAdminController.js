@@ -66,6 +66,64 @@ exports.loginSuperAdmin = async (req, res) => {
   }
 };
 
+// Change Super Admin Password
+exports.changePassword = async (req, res) => {
+  const { id } = req.params;
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({
+      success: false,
+      message: 'Current password and new password are required'
+    });
+  }
+
+  if (currentPassword === newPassword) {
+    return res.status(400).json({
+      success: false,
+      message: 'New password must be different from current password'
+    });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({
+      success: false,
+      message: 'New password must be at least 8 characters long'
+    });
+  }
+
+  try {
+    const [rows] = await db.query(
+      'SELECT password FROM super_admin WHERE super_admin_id = ?',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Super Admin not found' });
+    }
+
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, rows[0].password);
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+    const [result] = await db.query(
+      'UPDATE super_admin SET password = ? WHERE super_admin_id = ?',
+      [hashedNewPassword, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(500).json({ success: false, message: 'Failed to update password' });
+    }
+
+    return res.json({ success: true, message: 'Password changed successfully' });
+  } catch (err) {
+    console.error('DB Error (changeSuperAdminPassword):', err);
+    return res.status(500).json({ success: false, message: 'Database error' });
+  }
+};
+
 // ✅ Get Dashboard Statistics
 exports.getDashboardStats = async (req, res) => {
   try {
@@ -101,14 +159,14 @@ exports.getDashboardStats = async (req, res) => {
         FROM booking b 
         LEFT JOIN shop s ON b.shop_id = s.shop_id
         LEFT JOIN customer c ON b.customer_id = c.customer_id
-        ORDER BY b.booking_date DESC 
+        ORDER BY b.created_at DESC 
         LIMIT 5
       `);
       recentBookings = bookingResults;
     } catch (error) {
       console.log('Recent bookings query failed, using basic booking data');
       try {
-        const [basicBookings] = await db.query('SELECT * FROM booking ORDER BY booking_date DESC LIMIT 5');
+        const [basicBookings] = await db.query('SELECT * FROM booking ORDER BY created_at DESC LIMIT 5');
         recentBookings = basicBookings;
       } catch (basicError) {
         recentBookings = [];
@@ -152,10 +210,10 @@ exports.getDashboardStats = async (req, res) => {
       recentBookings.forEach(booking => {
         activities.push({
           action: `New booking${booking.shop_name ? ` at ${booking.shop_name}` : ''}`,
-          time: formatTimeAgo(booking.booking_date),
+          time: formatTimeAgo(booking.created_at),
           color: '#8b5cf6',
           type: 'booking',
-          timestamp: booking.booking_date
+          timestamp: booking.created_at
         });
       });
     }
@@ -235,6 +293,72 @@ exports.getDashboardStats = async (req, res) => {
         { service: 'Notifications', status: 'Unknown', color: '#f59e0b' }
       ]
     });
+  }
+};
+
+// Revenue analytics based on finalized payments
+exports.getRevenueAnalytics = async (req, res) => {
+  const toDate = req.query.to || new Date().toISOString().slice(0, 10);
+  const defaultFrom = new Date(`${toDate}T00:00:00Z`);
+  defaultFrom.setUTCDate(defaultFrom.getUTCDate() - 29);
+  const fromDate = req.query.from || defaultFrom.toISOString().slice(0, 10);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate) || fromDate > toDate) {
+    return res.status(400).json({ message: 'Valid from and to dates are required.' });
+  }
+
+  try {
+    const paidPaymentFilter = `
+      p.date >= ? AND p.date < DATE_ADD(?, INTERVAL 1 DAY)
+      AND LOWER(p.status) IN ('paid', 'success', 'succeeded', 'completed')
+      AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'rejected')
+    `;
+    const params = [fromDate, toDate];
+
+    const [summaryRows] = await db.query(`
+      SELECT COALESCE(SUM(p.amount), 0) AS total_revenue, COUNT(*) AS paid_payments,
+             COUNT(DISTINCT p.booking_id) AS completed_bookings, COALESCE(AVG(p.amount), 0) AS average_payment
+      FROM payment p LEFT JOIN booking b ON b.booking_id = p.booking_id
+      WHERE ${paidPaymentFilter}
+    `, params);
+    const [dailyRows] = await db.query(`
+      SELECT DATE(p.date) AS date, COALESCE(SUM(p.amount), 0) AS revenue, COUNT(*) AS payments
+      FROM payment p LEFT JOIN booking b ON b.booking_id = p.booking_id
+      WHERE ${paidPaymentFilter} GROUP BY DATE(p.date) ORDER BY DATE(p.date)
+    `, params);
+    const [methodRows] = await db.query(`
+      SELECT COALESCE(NULLIF(p.payment_method, ''), 'Unknown') AS method,
+             COALESCE(SUM(p.amount), 0) AS revenue, COUNT(*) AS payments
+      FROM payment p LEFT JOIN booking b ON b.booking_id = p.booking_id
+      WHERE ${paidPaymentFilter}
+      GROUP BY COALESCE(NULLIF(p.payment_method, ''), 'Unknown') ORDER BY revenue DESC
+    `, params);
+    const [shopRows] = await db.query(`
+      SELECT p.shop_id, COALESCE(s.name, CONCAT('Shop #', p.shop_id)) AS shop_name,
+             COALESCE(SUM(p.amount), 0) AS revenue, COUNT(*) AS payments
+      FROM payment p LEFT JOIN booking b ON b.booking_id = p.booking_id
+      LEFT JOIN shop s ON s.shop_id = p.shop_id
+      WHERE ${paidPaymentFilter}
+      GROUP BY p.shop_id, s.name ORDER BY revenue DESC LIMIT 10
+    `, params);
+
+    const summary = summaryRows[0] || {};
+    res.json({
+      from: fromDate,
+      to: toDate,
+      summary: {
+        totalRevenue: Number(summary.total_revenue || 0),
+        paidPayments: Number(summary.paid_payments || 0),
+        completedBookings: Number(summary.completed_bookings || 0),
+        averagePayment: Number(summary.average_payment || 0)
+      },
+      daily: dailyRows.map(row => ({ date: row.date, revenue: Number(row.revenue || 0), payments: Number(row.payments || 0) })),
+      paymentMethods: methodRows.map(row => ({ method: row.method, revenue: Number(row.revenue || 0), payments: Number(row.payments || 0) })),
+      topShops: shopRows.map(row => ({ shopId: row.shop_id, shopName: row.shop_name, revenue: Number(row.revenue || 0), payments: Number(row.payments || 0) }))
+    });
+  } catch (err) {
+    console.error('DB Error (getRevenueAnalytics):', err);
+    res.status(500).json({ message: 'Database error', error: err.message });
   }
 };
 
