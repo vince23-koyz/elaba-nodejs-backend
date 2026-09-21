@@ -1,6 +1,7 @@
 // controllers/shopController.js
 const db = require('../config/db');
 const { sendNotification } = require('../service/notificationService');
+const { shouldResetShopForResubmission } = require('../utils/shopResubmission');
 
 // CREATE Shop
 exports.createShop = async (req, res) => {
@@ -113,6 +114,240 @@ exports.getShopByAdmin = async (req, res) => {
   }
 };
 
+const DOCUMENT_FIELDS = new Set(['business_permit', 'dti_registration', 'sec_registration']);
+
+async function getShopDocumentReviewState(shopId) {
+  const [documents] = await db.query(
+    `SELECT document_type, status, document_id, uploaded_at
+     FROM shop_documents
+     WHERE shop_id = ?
+       AND document_type IN ('business_permit', 'dti_registration', 'sec_registration')
+     ORDER BY uploaded_at DESC, document_id DESC`,
+    [shopId]
+  );
+
+  const latestByType = new Map();
+  for (const document of documents) {
+    const type = document.document_type;
+    if (!latestByType.has(type)) {
+      latestByType.set(type, []);
+    }
+    latestByType.get(type).push(document);
+  }
+
+  const effectiveStatuses = {};
+  for (const [type, typeDocs] of latestByType.entries()) {
+    const hasApproved = typeDocs.some(document => document.status === 'approved');
+    const hasRejected = typeDocs.some(document => document.status === 'rejected');
+    const hasPending = typeDocs.some(document => document.status === 'pending');
+
+    if (hasApproved) {
+      effectiveStatuses[type] = 'approved';
+    } else if (hasRejected) {
+      effectiveStatuses[type] = 'rejected';
+    } else if (hasPending) {
+      effectiveStatuses[type] = 'pending';
+    } else {
+      effectiveStatuses[type] = 'unknown';
+    }
+  }
+
+  const effectiveDocs = Object.entries(effectiveStatuses).map(([document_type, status]) => ({
+    document_type,
+    status,
+  }));
+
+  return {
+    hasDocuments: effectiveDocs.length > 0,
+    allReviewed: effectiveDocs.length > 0 && effectiveDocs.every(document => document.status !== 'pending' && document.status !== 'unknown'),
+    allApproved: effectiveDocs.length > 0 && effectiveDocs.every(document => document.status === 'approved'),
+    hasRejectedDocument: effectiveDocs.some(document => document.status === 'rejected'),
+    permitApproved: effectiveDocs.some(document => document.document_type === 'business_permit' && document.status === 'approved'),
+  };
+}
+
+function getUploadedFileUrl(req, file) {
+  const pathOrUrl = file.path;
+  if (typeof pathOrUrl === 'string' && /^https?:\/\//.test(pathOrUrl)) {
+    return pathOrUrl;
+  }
+
+  const fallbackBaseUrl = process.env.PUBLIC_BASE_URL || 'http://localhost:5000';
+  const host = req.get ? req.get('host') : '';
+  const normalizedHost = String(host || '').replace(/:\d+$/, '');
+  const isEmulatorHost = ['10.0.2.2', 'localhost', '127.0.0.1', '::1'].includes(normalizedHost);
+  const baseUrl = isEmulatorHost && !process.env.PUBLIC_BASE_URL ? fallbackBaseUrl : (process.env.PUBLIC_BASE_URL || `${req.protocol}://${host}`);
+  const filename = file.filename || (pathOrUrl ? pathOrUrl.split(/[\\/]/).pop() : null);
+
+  return filename ? `${baseUrl.replace(/\/$/, '')}/uploads/shop-documents/${filename}` : null;
+}
+
+// Upload one or more shop verification documents.
+exports.uploadShopDocuments = async (req, res) => {
+  const { id: shopId } = req.params;
+  const files = Object.values(req.files || {}).flat();
+
+  if (!files.length) {
+    return res.status(400).json({ message: 'At least one verification document is required.' });
+  }
+
+  if (!files.some(file => file.fieldname === 'business_permit')) {
+    return res.status(400).json({ message: 'Business/Mayor’s Permit is required.' });
+  }
+
+  const invalidField = files.find(file => !DOCUMENT_FIELDS.has(file.fieldname));
+  if (invalidField) {
+    return res.status(400).json({ message: `Unsupported document type: ${invalidField.fieldname}` });
+  }
+
+  try {
+    const [shopRows] = await db.query('SELECT shop_id FROM shop WHERE shop_id = ? LIMIT 1', [shopId]);
+    if (!shopRows[0]) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    const uniqueDocumentTypes = [...new Set(files.map(file => file.fieldname).filter(field => DOCUMENT_FIELDS.has(field)))];
+    if (uniqueDocumentTypes.length > 0) {
+      await db.query(
+        `DELETE FROM shop_documents
+         WHERE shop_id = ?
+           AND document_type IN (?)`,
+        [shopId, uniqueDocumentTypes]
+      );
+    }
+
+    const documents = [];
+    for (const file of files) {
+      const fileUrl = getUploadedFileUrl(req, file);
+      const [result] = await db.query(
+        `INSERT INTO shop_documents
+          (shop_id, document_type, file_url, original_filename, mime_type, file_size, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+        [shopId, file.fieldname, fileUrl, file.originalname, file.mimetype, file.size || null]
+      );
+
+      documents.push({
+        document_id: result.insertId,
+        shop_id: Number(shopId),
+        document_type: file.fieldname,
+        file_url: fileUrl,
+        status: 'pending',
+      });
+    }
+
+    const [shopStateRows] = await db.query('SELECT status, admin_id FROM shop WHERE shop_id = ? LIMIT 1', [shopId]);
+    const currentShopState = shopStateRows?.[0];
+    if (currentShopState && currentShopState.status === 'rejected') {
+      await db.query('UPDATE shop SET status = ?, rejection_reason = NULL WHERE shop_id = ?', ['pending', shopId]);
+
+      const io = req.app && req.app.get ? req.app.get('io') : null;
+      if (io && currentShopState.admin_id) {
+        io.to(`user_admin_${currentShopState.admin_id}`).emit('shopStatusUpdated', {
+          shopId: Number(shopId),
+          adminId: Number(currentShopState.admin_id),
+          status: 'pending',
+          at: new Date().toISOString(),
+        });
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Verification documents uploaded successfully.',
+      documents,
+    });
+  } catch (err) {
+    console.error('DB Error (uploadShopDocuments):', err);
+    res.status(500).json({ message: 'Failed to save verification documents.', error: err.message });
+  }
+};
+
+// List verification documents for a shop.
+exports.getShopDocuments = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT document_id, shop_id, document_type, file_url, original_filename,
+              mime_type, file_size, status, rejection_reason, uploaded_at,
+              reviewed_at, reviewed_by
+       FROM shop_documents
+       WHERE shop_id = ?
+       ORDER BY uploaded_at DESC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('DB Error (getShopDocuments):', err);
+    res.status(500).json({ message: 'Failed to load verification documents.', error: err.message });
+  }
+};
+
+// Review one verification document.
+exports.reviewShopDocument = async (req, res) => {
+  const { id: documentId } = req.params;
+  const { status, rejection_reason, reviewed_by } = req.body || {};
+
+  if (!['approved', 'rejected'].includes(status)) {
+    return res.status(400).json({ message: 'Document status must be approved or rejected.' });
+  }
+
+  if (status === 'rejected' && !String(rejection_reason || '').trim()) {
+    return res.status(400).json({ message: 'A rejection reason is required.' });
+  }
+
+  try {
+    const [documentRows] = await db.query(
+      `SELECT sd.document_id, sd.shop_id, sd.document_type, sd.file_url, s.admin_id, s.name AS shop_name
+       FROM shop_documents sd
+       LEFT JOIN shop s ON s.shop_id = sd.shop_id
+       WHERE sd.document_id = ? LIMIT 1`,
+      [documentId]
+    );
+    const documentInfo = documentRows && documentRows[0] ? documentRows[0] : null;
+
+    const [result] = await db.query(
+      `UPDATE shop_documents
+       SET status = ?, rejection_reason = ?, reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ?
+       WHERE document_id = ?`,
+      [status, status === 'rejected' ? String(rejection_reason).trim() : null, reviewed_by || null, documentId]
+    );
+
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: 'Verification document not found.' });
+    }
+
+    if (status === 'rejected' && documentInfo?.admin_id) {
+      const label = documentInfo.document_type === 'business_permit'
+        ? 'Business / Mayor’s Permit'
+        : documentInfo.document_type === 'dti_registration'
+          ? 'DTI Registration'
+          : documentInfo.document_type === 'sec_registration'
+            ? 'SEC Registration'
+            : 'Verification document';
+
+      const message = `${label} was rejected. Please review the reason and re-upload the correct file.`;
+      try {
+        await sendNotification({
+          accountId: documentInfo.admin_id,
+          accountType: 'admin',
+          title: 'Verification document rejected',
+          message,
+        });
+      } catch (notificationError) {
+        console.error('Document rejection notification error:', notificationError);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Document ${status} successfully.`,
+      status,
+    });
+  } catch (err) {
+    console.error('DB Error (reviewShopDocument):', err);
+    res.status(500).json({ message: 'Failed to review verification document.', error: err.message });
+  }
+};
+
 // REJECT pending shop and notify the shop owner
 exports.rejectShop = async (req, res) => {
   const { id } = req.params;
@@ -127,6 +362,11 @@ exports.rejectShop = async (req, res) => {
 
     if (!shop) {
       return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    const documentReview = await getShopDocumentReviewState(id);
+    if (!documentReview.hasDocuments || !documentReview.allReviewed) {
+      return res.status(400).json({ message: 'Review all shop documents before deciding on the shop registration.' });
     }
 
     await db.query(
@@ -203,6 +443,27 @@ exports.updateShop = async (req, res) => {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
+    if (status === 'active') {
+      const documentReview = await getShopDocumentReviewState(id);
+      if (!documentReview.hasDocuments || !documentReview.allReviewed) {
+        return res.status(400).json({
+          message: 'Review all shop documents before approving the shop.',
+        });
+      }
+
+      if (documentReview.hasRejectedDocument) {
+        return res.status(400).json({
+          message: 'Shop cannot be approved because one or more verification documents were rejected.',
+        });
+      }
+
+      if (!documentReview.permitApproved || !documentReview.allApproved) {
+        return res.status(400).json({
+          message: 'Shop cannot be approved until the Business/Mayor’s Permit and all required verification documents are approved.',
+        });
+      }
+    }
+
     const normalizedPickupValue = typeof pickup_delivery_enabled !== 'undefined' ? Number(pickup_delivery_enabled) : undefined;
     const updateFields = [];
     const params = [];
@@ -238,8 +499,13 @@ exports.updateShop = async (req, res) => {
       addField('logo', logoPath, existingShop.logo);
     }
 
-    addField('status', status, existingShop.status);
-    if (status === 'pending' && existingShop.status === 'rejected') {
+    const shouldResetToPending = shouldResetShopForResubmission({
+      existingStatus: existingShop.status,
+      requestedStatus: status,
+    });
+
+    addField('status', status, shouldResetToPending ? 'pending' : existingShop.status);
+    if (shouldResetToPending) {
       updateFields.push('rejection_reason=?');
       params.push(null);
     }
@@ -269,8 +535,8 @@ exports.updateShop = async (req, res) => {
     if (req.file) {
       responseData.logo = `/uploads/shop-images/${req.file.filename}`;
     }
-    if (typeof status !== 'undefined') {
-      responseData.status = status;
+    if (typeof status !== 'undefined' || shouldResetToPending) {
+      responseData.status = shouldResetToPending ? 'pending' : status;
     }
     if (typeof normalizedPickupValue !== 'undefined') {
       responseData.pickup_delivery_enabled = normalizedPickupValue;
@@ -291,11 +557,11 @@ exports.updateShop = async (req, res) => {
           at: new Date().toISOString(),
         });
 
-        if (typeof status !== 'undefined' && existingShop.admin_id) {
+        if ((typeof status !== 'undefined' || shouldResetToPending) && existingShop.admin_id) {
           io.to(`user_admin_${existingShop.admin_id}`).emit('shopStatusUpdated', {
             shopId: Number(id),
             adminId: Number(existingShop.admin_id),
-            status,
+            status: shouldResetToPending ? 'pending' : status,
             at: new Date().toISOString(),
           });
         }

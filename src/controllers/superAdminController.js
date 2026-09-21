@@ -1,4 +1,6 @@
 const bcrypt = require('bcryptjs');
+const fs = require('fs');
+const path = require('path');
 const db = require('../config/db');
 
 // ✅ Register Super Admin
@@ -66,6 +68,58 @@ exports.loginSuperAdmin = async (req, res) => {
   }
 };
 
+exports.updateProfile = async (req, res) => {
+  const { id } = req.params;
+  const { username } = req.body;
+
+  if (!username || String(username).trim().length < 3) {
+    return res.status(400).json({
+      success: false,
+      message: 'Username must be at least 3 characters long'
+    });
+  }
+
+  const trimmedUsername = String(username).trim();
+
+  try {
+    const [existing] = await db.query(
+      'SELECT super_admin_id FROM super_admin WHERE username = ? AND super_admin_id != ?',
+      [trimmedUsername, id]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Username is already taken'
+      });
+    }
+
+    const [result] = await db.query(
+      'UPDATE super_admin SET username = ? WHERE super_admin_id = ?',
+      [trimmedUsername, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Super admin not found'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Username updated successfully',
+      super_admin: {
+        id: Number(id),
+        username: trimmedUsername,
+      }
+    });
+  } catch (err) {
+    console.error('DB Error (updateProfile):', err);
+    return res.status(500).json({ success: false, message: 'Database error' });
+  }
+};
+
 // Change Super Admin Password
 exports.changePassword = async (req, res) => {
   const { id } = req.params;
@@ -121,6 +175,302 @@ exports.changePassword = async (req, res) => {
   } catch (err) {
     console.error('DB Error (changeSuperAdminPassword):', err);
     return res.status(500).json({ success: false, message: 'Database error' });
+  }
+};
+
+exports.getSavedShopDocuments = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT sd.document_id, sd.shop_id, sd.document_type, sd.file_url,
+              sd.original_filename, sd.mime_type, sd.file_size, sd.status,
+              sd.rejection_reason, sd.uploaded_at, s.name AS shop_name
+       FROM shop_documents sd
+       LEFT JOIN shop s ON s.shop_id = sd.shop_id
+       ORDER BY sd.uploaded_at DESC, sd.document_id DESC`
+    );
+
+    const uploadsDir = path.resolve(__dirname, '../../uploads/shop-documents');
+    const localFiles = fs.existsSync(uploadsDir)
+      ? fs.readdirSync(uploadsDir).filter((name) => name && !name.startsWith('.'))
+      : [];
+
+    const dbFileNames = new Set();
+    for (const row of rows) {
+      if (typeof row.file_url === 'string') {
+        try {
+          const parsedUrl = new URL(row.file_url);
+          const filename = parsedUrl.pathname.split('/').pop();
+          if (filename) dbFileNames.add(filename);
+        } catch (_) {
+          const filename = String(row.file_url).split(/[\\/]/).pop();
+          if (filename) dbFileNames.add(filename);
+        }
+      }
+
+      if (typeof row.original_filename === 'string' && row.original_filename) {
+        dbFileNames.add(row.original_filename);
+      }
+    }
+
+    const orphanedFiles = localFiles
+      .filter((filename) => !dbFileNames.has(filename))
+      .map((filename) => ({
+        document_id: `orphan_${filename}`,
+        shop_id: null,
+        document_type: 'orphaned_file',
+        file_url: `/uploads/shop-documents/${filename}`,
+        original_filename: filename,
+        mime_type: null,
+        file_size: null,
+        status: 'orphaned',
+        rejection_reason: null,
+        uploaded_at: null,
+        shop_name: 'Untracked file',
+        is_orphaned: true,
+      }));
+
+    const mappedRows = rows.map((doc) => ({
+      ...doc,
+      status: doc.status || 'pending',
+      shop_name: doc.shop_name || `Shop #${doc.shop_id || 'unknown'}`,
+      is_orphaned: false,
+    }));
+
+    return res.json({
+      success: true,
+      data: [...mappedRows, ...orphanedFiles],
+    });
+  } catch (error) {
+    console.error('DB Error (getSavedShopDocuments):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to load saved shop documents.',
+      error: error.message,
+    });
+  }
+};
+
+exports.deleteSavedShopDocument = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const isOrphaned = typeof id === 'string' && id.startsWith('orphan_');
+
+    if (isOrphaned) {
+      const filename = id.replace(/^orphan_/, '');
+      const safeFilename = filename.split(/[\\/]/).join('');
+      const filePath = path.resolve(__dirname, '../../uploads/shop-documents', safeFilename);
+
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+
+      return res.json({
+        success: true,
+        message: 'Unlinked document deleted successfully.',
+        document_id: id,
+      });
+    }
+
+    const [rows] = await db.query(
+      'SELECT document_id, file_url, original_filename FROM shop_documents WHERE document_id = ? LIMIT 1',
+      [id]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Saved document not found.'
+      });
+    }
+
+    const document = rows[0];
+    try {
+      const parsedUrl = new URL(document.file_url);
+      const relativePath = parsedUrl.pathname.replace(/^\/+/, '');
+      const normalizedRelative = relativePath.replace(/^uploads\//, '');
+      const filePath = path.resolve(__dirname, '../../uploads', normalizedRelative);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (_) {
+      // Ignore malformed local file URLs and continue with DB cleanup.
+    }
+
+    const [result] = await db.query('DELETE FROM shop_documents WHERE document_id = ?', [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Saved document not found.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Saved document deleted successfully.',
+      document_id: Number(id),
+    });
+  } catch (error) {
+    console.error('DB Error (deleteSavedShopDocument):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete saved document.',
+      error: error.message,
+    });
+  }
+};
+
+exports.deleteAllOrphanedDocuments = async (req, res) => {
+  try {
+    const uploadsDir = path.resolve(__dirname, '../../uploads/shop-documents');
+    if (!fs.existsSync(uploadsDir)) {
+      return res.json({
+        success: true,
+        deletedCount: 0,
+        message: 'No orphaned files found.',
+      });
+    }
+
+    const localFiles = fs.readdirSync(uploadsDir).filter((name) => name && !name.startsWith('.'));
+    const [rows] = await db.query(
+      'SELECT file_url, original_filename FROM shop_documents WHERE file_url IS NOT NULL'
+    );
+
+    const trackedNames = new Set();
+    for (const row of rows) {
+      if (typeof row.file_url === 'string') {
+        try {
+          const parsedUrl = new URL(row.file_url);
+          const filename = parsedUrl.pathname.split('/').pop();
+          if (filename) trackedNames.add(filename);
+        } catch (_) {
+          const filename = String(row.file_url).split(/[\\/]/).pop();
+          if (filename) trackedNames.add(filename);
+        }
+      }
+      if (typeof row.original_filename === 'string' && row.original_filename) {
+        trackedNames.add(row.original_filename);
+      }
+    }
+
+    const orphanedFiles = localFiles.filter((filename) => !trackedNames.has(filename));
+    let deletedCount = 0;
+
+    for (const filename of orphanedFiles) {
+      const filePath = path.resolve(uploadsDir, filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        deletedCount += 1;
+      }
+    }
+
+    return res.json({
+      success: true,
+      deletedCount,
+      message: deletedCount
+        ? `Deleted ${deletedCount} unlinked document(s).`
+        : 'No unlinked files found.',
+    });
+  } catch (error) {
+    console.error('DB Error (deleteAllOrphanedDocuments):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete orphaned documents.',
+      error: error.message,
+    });
+  }
+};
+
+exports.cleanupRejectedDocuments = async (req, res) => {
+  const olderThanDays = Number(req.body?.olderThanDays ?? 30);
+  const dryRun = req.body?.dryRun === true || req.body?.dryRun === 'true';
+
+  if (!Number.isFinite(olderThanDays) || olderThanDays < 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'olderThanDays must be a valid number of days.'
+    });
+  }
+
+  try {
+    const cutoffDate = new Date(Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)).toISOString();
+    const [rows] = await db.query(
+      `SELECT document_id, file_url, original_filename, uploaded_at
+       FROM shop_documents
+       WHERE status = 'rejected'
+         AND uploaded_at <= ?
+       ORDER BY uploaded_at ASC`,
+      [cutoffDate]
+    );
+
+    const candidates = rows.filter(row => typeof row.file_url === 'string' && /\/uploads\/shop-documents\//i.test(row.file_url));
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dryRun: true,
+        candidateCount: candidates.length,
+        olderThanDays,
+        message: candidates.length
+          ? `Found ${candidates.length} rejected document(s) older than ${olderThanDays} day(s).`
+          : `No rejected document(s) older than ${olderThanDays} day(s) were found.`,
+        candidates: candidates.slice(0, 20)
+      });
+    }
+
+    let deletedCount = 0;
+    const deletedDocumentIds = [];
+    const failures = [];
+
+    for (const document of candidates) {
+      try {
+        let filePath = null;
+        try {
+          const parsedUrl = new URL(document.file_url);
+          const relativePath = parsedUrl.pathname.replace(/^\/+/, '');
+          const normalizedRelative = relativePath.replace(/^uploads\//, '');
+          filePath = path.resolve(__dirname, '../../uploads', normalizedRelative);
+        } catch (_) {
+          filePath = null;
+        }
+
+        if (filePath && fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+
+        const [result] = await db.query('DELETE FROM shop_documents WHERE document_id = ?', [document.document_id]);
+        if (result.affectedRows > 0) {
+          deletedCount += 1;
+          deletedDocumentIds.push(document.document_id);
+        }
+      } catch (error) {
+        failures.push({
+          document_id: document.document_id,
+          filename: document.original_filename || 'unknown',
+          reason: error.message,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      dryRun: false,
+      deletedCount,
+      failedCount: failures.length,
+      olderThanDays,
+      deletedDocumentIds,
+      failures,
+      message: deletedCount
+        ? `Successfully cleaned up ${deletedCount} stale rejected document(s).`
+        : 'No stale rejected document(s) were deleted.'
+    });
+  } catch (error) {
+    console.error('DB Error (cleanupRejectedDocuments):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to clean up rejected documents.',
+      error: error.message
+    });
   }
 };
 

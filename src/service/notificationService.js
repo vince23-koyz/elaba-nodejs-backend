@@ -106,6 +106,49 @@ async function sendNotification({ accountId, accountType, bookingId, title, mess
     return { notificationId: null, savedNotification: null, skipped: true };
   }
 
+  const duplicateKey = [
+    String(accountType || ''),
+    String(accountId || ''),
+    String(bookingId ?? ''),
+    String(title || ''),
+    String(title || '').toLowerCase().includes('rejected') ? '' : String(message || '')
+  ].join('|');
+
+  const isRejectionNotification = String(title || '').toLowerCase().includes('rejected');
+
+  const [duplicateRows] = await db.query(
+    isRejectionNotification
+      ? `SELECT notification_id
+         FROM notifications
+         WHERE account_type = ?
+           AND account_id = ?
+           AND COALESCE(booking_id, '') = COALESCE(?, '')
+           AND LOWER(TRIM(title)) = LOWER(TRIM(?))
+         ORDER BY created_at DESC, notification_id DESC LIMIT 1`
+      : `SELECT notification_id
+         FROM notifications
+         WHERE account_type = ?
+           AND account_id = ?
+           AND COALESCE(booking_id, '') = COALESCE(?, '')
+           AND LOWER(TRIM(title)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(message)) = LOWER(TRIM(?))
+         ORDER BY created_at DESC, notification_id DESC LIMIT 1`,
+    isRejectionNotification
+      ? [accountType, accountId, bookingId ?? null, title || '']
+      : [accountType, accountId, bookingId ?? null, title || '', message || '']
+  );
+
+  if (duplicateRows && duplicateRows[0]) {
+    const existingNotificationId = duplicateRows[0].notification_id;
+    await db.query(
+      'UPDATE notifications SET created_at = CURRENT_TIMESTAMP, is_read = 0 WHERE notification_id = ?',
+      [existingNotificationId]
+    );
+
+    const [freshRows] = await db.query('SELECT * FROM notifications WHERE notification_id = ? LIMIT 1', [existingNotificationId]);
+    return { notificationId: existingNotificationId, savedNotification: freshRows?.[0] || null, duplicateKey };
+  }
+
   // 1. Save to DB (in-app notification). Customer updates share one row per booking.
   let notificationId;
   if (accountType === 'customer' && bookingId) {
