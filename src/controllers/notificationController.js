@@ -74,11 +74,10 @@ exports.deleteDeviceToken = async (req, res) => {
 
 // ✅ Get all in-app notifications
 exports.getNotifications = async (req, res) => {
-  const { accountId, accountType } = req.query;
+  const { accountId, accountType, shopId } = req.query;
 
   try {
-    const [rows] = await db.query(
-      `SELECT n.*
+    let sql = `SELECT n.*
        FROM notifications n
        LEFT JOIN booking b ON b.booking_id = n.booking_id
        WHERE n.account_id = ?
@@ -95,12 +94,23 @@ exports.getNotifications = async (req, res) => {
                WHERE br.booking_id = n.booking_id
              )
            )
-         )
-       ORDER BY n.created_at DESC`,
-      [accountId, accountType]
-    );
+         )`;
+
+    const params = [accountId, accountType];
+
+    // Prevent admin users from seeing notifications that belong to a different shop.
+    // Generic account-level notifications without a booking are still shown when they belong to this admin.
+    if (shopId !== undefined && shopId !== null && String(shopId).trim() !== '') {
+      sql += ` AND (n.booking_id IS NULL OR b.shop_id = ?)`;
+      params.push(shopId);
+    }
+
+    sql += ` ORDER BY n.created_at DESC`;
+
+    const [rows] = await db.query(sql, params);
     res.json(rows);
   } catch (err) {
+    console.error('❌ Error fetching notifications:', err);
     res.status(500).json({ error: "Failed to fetch notifications" });
   }
 };
