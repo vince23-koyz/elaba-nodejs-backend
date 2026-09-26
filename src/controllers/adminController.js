@@ -183,15 +183,27 @@ exports.getAdminById = async (req, res) => {
 // UPDATE ADMIN
 exports.updateAdmin = async (req, res) => {
   const { id } = req.params;
-  const { first_name, last_name, street, zone, barangay, city, phone_number } = req.body;
+  const { first_name, last_name, street, zone, barangay, city } = req.body;
 
   try {
+    const [existingAdmin] = await db.query('SELECT phone_number FROM admin WHERE admin_id = ?', [id]);
+
+    if (!existingAdmin || existingAdmin.length === 0) {
+      return res.status(404).json({ message: 'Admin not found' });
+    }
+
+    const protectedPhoneNumber = existingAdmin[0].phone_number;
+
+    if (!protectedPhoneNumber) {
+      return res.status(400).json({ message: 'Admin phone number is missing and cannot be updated.' });
+    }
+
     const sql = `UPDATE admin 
                  SET first_name=?, last_name=?, street=?, zone=?, barangay=?, city=?, phone_number=? 
                  WHERE admin_id=?`;
 
     const [result] = await db.query(sql, [
-      first_name, last_name, street, zone, barangay, city, phone_number, id
+      first_name, last_name, street || '', zone || '', barangay || '', city || '', protectedPhoneNumber, id
     ]);
 
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Admin not found' });

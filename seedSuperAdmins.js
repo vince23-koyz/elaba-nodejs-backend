@@ -8,7 +8,7 @@ const superAdmins = [
   {
     username: 'vinsmok24',
     email: 'vipanton@my.cspc.edu.ph',
-    password: 'SuperAd_elaba2026'
+    password: 'super26admin'
   },
   {
     username: 'zimmry321',
