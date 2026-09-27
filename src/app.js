@@ -202,16 +202,20 @@ io.on('connection', (socket) => {
     // Persist user info for disconnect logging
     socket.userData = { userId, userType };
 
-    // Update presence counter and mark online in DB on first connection
+    // Update presence counter and mark online in DB on first connection.
+    // Only mobile/customer-admin accounts have device token rows; superadmin is a web session and should not
+    // update the device_tokens table, otherwise MySQL tries to compare a string against a numeric column.
     try {
       const key = `${userType}:${userId}`;
       const current = userPresence.get(key) || 0;
       userPresence.set(key, current + 1);
       if (current === 0) {
-        await db.query(
-          'UPDATE device_tokens SET is_active = 1, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
-          [userId, userType]
-        );
+        if (['customer', 'admin'].includes(userType)) {
+          await db.query(
+            'UPDATE device_tokens SET is_active = 1, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
+            [userId, userType]
+          );
+        }
         socket.broadcast.emit('userOnline', { userId, userType, timestamp: new Date().toISOString() });
       }
     } catch (e) {
@@ -297,17 +301,20 @@ io.on('connection', (socket) => {
         timestamp: new Date().toISOString()
       });
 
-      // Update presence counter and mark offline in DB when count reaches zero
+      // Update presence counter and mark offline in DB when count reaches zero.
+      // Skip device token rows for non-mobile account types like superadmin.
       try {
         const key = `${socket.userData.userType}:${socket.userData.userId}`;
         const current = userPresence.get(key) || 0;
         const next = Math.max(0, current - 1);
         if (next === 0) {
           userPresence.delete(key);
-          await db.query(
-            'UPDATE device_tokens SET is_active = 0, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
-            [socket.userData.userId, socket.userData.userType]
-          );
+          if (['customer', 'admin'].includes(socket.userData.userType)) {
+            await db.query(
+              'UPDATE device_tokens SET is_active = 0, updated_at = NOW() WHERE account_id = ? AND account_type = ?',
+              [socket.userData.userId, socket.userData.userType]
+            );
+          }
         } else {
           userPresence.set(key, next);
         }
