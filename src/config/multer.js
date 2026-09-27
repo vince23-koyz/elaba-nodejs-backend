@@ -80,7 +80,6 @@ const upload = multer({ storage });
 
 const documentUpload = multer({
   storage: documentStorage,
-  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (!DOCUMENT_MIME_TYPES.has(file.mimetype)) {
       return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', file.fieldname));

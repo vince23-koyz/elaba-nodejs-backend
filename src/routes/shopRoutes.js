@@ -20,9 +20,7 @@ const router = express.Router();
 function handleDocumentUploadError(err, req, res, next) {
   if (!err) return next();
   if (err.name === 'MulterError') {
-    const message = err.code === 'LIMIT_FILE_SIZE'
-      ? 'Each verification document must be 5 MB or smaller.'
-      : 'Only PDF, JPG, and PNG verification documents are accepted.';
+    const message = 'Only PDF, JPG, and PNG verification documents are accepted.';
     return res.status(400).json({ success: false, message });
   }
   console.error('Document upload error:', err);
