@@ -211,6 +211,17 @@ exports.createBooking = async (req, res) => {
   }
 
   try {
+    const [shopRows] = await db.query(
+      'SELECT status FROM shop WHERE shop_id = ? LIMIT 1',
+      [shop_id],
+    );
+    if (!shopRows.length) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+    if (String(shopRows[0].status || '').toLowerCase() !== 'active') {
+      return res.status(409).json({ message: 'This shop is currently closed and cannot accept bookings.' });
+    }
+
     let sql, params;
 
     if (isPickupBooking) {
