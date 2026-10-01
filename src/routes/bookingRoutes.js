@@ -21,7 +21,6 @@ router.get('/:id', ensureFn(bookingController.getBookingById, 'getBookingById'))
 router.get('/:id/reschedule', ensureFn(bookingController.getRescheduleRequest, 'getRescheduleRequest'));
 router.post('/:id/reschedule', ensureFn(bookingController.createRescheduleRequest, 'createRescheduleRequest'));
 router.put('/:id', ensureFn(bookingController.updateBooking, 'updateBooking'));     // PUT /api/bookings/:id
-router.patch('/:id/extra-charge', ensureFn(bookingController.addBookingExtraCharge, 'addBookingExtraCharge'));
 router.patch('/:id/status', ensureFn(bookingController.updateBookingStatus, 'updateBookingStatus')); // PATCH /api/bookings/:id/status
 router.delete('/:id', ensureFn(bookingController.deleteBooking, 'deleteBooking'));  // DELETE /api/bookings/:id
 
