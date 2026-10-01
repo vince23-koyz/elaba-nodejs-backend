@@ -29,52 +29,6 @@ exports.getPaymentById = async (req, res) => {
   }
 };
 
-exports.getRefunds = async (req, res) => {
-  try {
-    const [refundRows] = await db.query(`
-      SELECT refund_id, paymongo_refund_id, status
-      FROM refund
-      WHERE paymongo_refund_id IS NOT NULL
-        AND LOWER(COALESCE(status, '')) IN ('pending', 'processing')
-    `);
-    for (const refund of refundRows) {
-      try {
-        const providerResult = await paymongoService.getRefund(refund.paymongo_refund_id);
-        if (providerResult.success) {
-          const providerStatus = providerResult.refund.attributes.status;
-          if (providerStatus !== refund.status) {
-            await db.query(
-              'UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?',
-              [providerStatus, refund.refund_id]
-            );
-          }
-        }
-      } catch (syncError) {
-        console.warn(`[PayMongo] Could not sync refund ${refund.refund_id}:`, syncError.message);
-      }
-    }
-
-    const [rows] = await db.query(`
-      SELECT r.refund_id, r.paymongo_refund_id, r.payment_id, r.booking_id,
-             r.amount, r.reason, r.notes, r.status, r.created_at, r.updated_at,
-             p.payment_method, p.status AS payment_status, p.paymongo_payment_id,
-             b.status AS booking_status, b.total_amount,
-             c.first_name AS customer_first_name, c.last_name AS customer_last_name,
-             s.name AS shop_name
-      FROM refund r
-      INNER JOIN payment p ON p.payment_id = r.payment_id
-      INNER JOIN booking b ON b.booking_id = r.booking_id
-      LEFT JOIN customer c ON c.customer_id = b.customer_id
-      LEFT JOIN shop s ON s.shop_id = b.shop_id
-      ORDER BY r.created_at DESC, r.refund_id DESC
-    `);
-    return res.json({ success: true, refunds: rows });
-  } catch (error) {
-    console.error('getRefunds error:', error);
-    return res.status(500).json({ success: false, message: 'Unable to load refunds' });
-  }
-};
-
 // CREATE Payment (updated to include amount and optional transaction_id)
 exports.createPayment = async (req, res) => {
   const { 
@@ -335,150 +289,6 @@ exports.checkPaymentStatus = async (req, res) => {
   }
 };
 
-exports.syncRefundStatus = async (req, res) => {
-  const { refundId } = req.params;
-  if (!refundId) return res.status(400).json({ success: false, message: 'refundId required' });
-
-  try {
-    const [rows] = await db.query(`
-      SELECT r.refund_id, r.paymongo_refund_id, r.payment_id, r.booking_id,
-             r.amount, r.status, b.customer_id
-      FROM refund r
-      INNER JOIN booking b ON b.booking_id = r.booking_id
-      WHERE r.refund_id = ?
-      LIMIT 1
-    `, [refundId]);
-    if (!rows.length) return res.status(404).json({ success: false, message: 'Refund not found' });
-
-    const localRefund = rows[0];
-    if (!localRefund.paymongo_refund_id) {
-      return res.status(400).json({ success: false, message: 'Refund has no PayMongo refund ID' });
-    }
-    const providerResult = await paymongoService.getRefund(localRefund.paymongo_refund_id);
-    if (!providerResult.success) {
-      return res.status(502).json({ success: false, message: providerResult.error });
-    }
-
-    const nextStatus = providerResult.refund.attributes.status;
-    const previousStatus = String(localRefund.status || '').toLowerCase();
-    await db.query(
-      'UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?',
-      [nextStatus, refundId]
-    );
-
-    if (nextStatus !== previousStatus && ['succeeded', 'failed'].includes(nextStatus) && localRefund.customer_id) {
-      const title = nextStatus === 'succeeded' ? 'Refund Successful' : 'Refund Failed';
-      const message = nextStatus === 'succeeded'
-        ? `Your refund for booking #${localRefund.booking_id} was successful.`
-        : `Your refund for booking #${localRefund.booking_id} failed. Please contact support.`;
-      const { savedNotification } = await sendNotification({
-        accountId: localRefund.customer_id,
-        accountType: 'customer',
-        bookingId: localRefund.booking_id,
-        title,
-        message,
-        replaceExisting: true,
-        existingTitles: ['Refund Processing', 'Refund Successful', 'Refund Failed']
-      });
-      const io = req.app.get('io');
-      if (io && savedNotification) {
-        io.to(`user_customer_${localRefund.customer_id}`).emit('newNotification', savedNotification);
-      }
-    }
-
-    return res.json({
-      success: true,
-      refund: {
-        refund_id: localRefund.refund_id,
-        paymongo_refund_id: localRefund.paymongo_refund_id,
-        amount: Number(localRefund.amount),
-        status: nextStatus
-      }
-    });
-  } catch (error) {
-    console.error('syncRefundStatus error:', error);
-    return res.status(500).json({ success: false, message: 'Unable to sync refund status' });
-  }
-};
-
-exports.createBookingRefund = async (req, res) => {
-  const { booking_id, customer_id, reason = null, notes } = req.body;
-  if (!booking_id) return res.status(400).json({ success: false, message: 'booking_id required' });
-
-  try {
-    const result = await processBookingRefund({
-      bookingId: booking_id,
-      customerId: customer_id,
-      reason,
-      notes,
-      requireCancelled: true,
-      processWithPayMongo: false
-    });
-    if (!result.success) {
-      return res.status(result.code || 400).json({
-        success: false,
-        message: result.message || 'Refund could not be processed',
-        refund: result.refund || null
-      });
-    }
-    return res.status(result.duplicate ? 200 : 201).json({
-      success: true,
-      message: result.duplicate ? 'Refund already exists' : 'Refund request created',
-      refund: result.refund || null
-    });
-  } catch (error) {
-    console.error('createBookingRefund error:', error);
-    return res.status(500).json({ success: false, message: 'Unable to create refund request' });
-  }
-};
-
-exports.processExistingRefund = async (req, res) => {
-  const { refundId } = req.params;
-  const { customer_id: customerId, reason = 'requested_by_customer', notes = null } = req.body || {};
-  if (!refundId) return res.status(400).json({ success: false, message: 'refundId required' });
-  const allowedReasons = new Set(['duplicate', 'fraudulent', 'requested_by_customer', 'others']);
-  if (!allowedReasons.has(reason)) {
-    return res.status(400).json({ success: false, message: 'Invalid PayMongo refund reason' });
-  }
-
-  try {
-    const [rows] = await db.query(
-      'SELECT r.booking_id, b.customer_id FROM refund r INNER JOIN booking b ON b.booking_id = r.booking_id WHERE r.refund_id = ? LIMIT 1',
-      [refundId]
-    );
-    if (!rows.length) return res.status(404).json({ success: false, message: 'Refund request not found' });
-    if (customerId != null && Number(rows[0].customer_id) !== Number(customerId)) {
-      return res.status(403).json({ success: false, message: 'You are not authorized to process this refund' });
-    }
-
-    const result = await processBookingRefund({
-      bookingId: rows[0].booking_id,
-      customerId: customerId ?? null,
-      reason,
-      notes,
-      requireCancelled: true,
-      processWithPayMongo: true
-    });
-    if (!result.success) {
-      return res.status(result.code || 400).json({ success: false, message: result.message, refund: result.refund || null });
-    }
-    const io = req.app.get('io');
-    if (io && io.to) {
-      io.to(`user_customer_${rows[0].customer_id}`).emit('refundUpdated', {
-        bookingId: rows[0].booking_id,
-        refundStatus: result.refund?.status || 'succeeded',
-      });
-    }
-    return res.json({ success: true, message: 'Refund sent to PayMongo', refund: result.refund });
-  } catch (error) {
-    console.error('processExistingRefund error:', error);
-    return res.status(500).json({
-      success: false,
-      message: error?.message || 'Unable to process refund'
-    });
-  }
-};
-
 function verifyPayMongoSignature(rawBody, signatureHeader, webhookSecret) {
   if (!rawBody || !signatureHeader || !webhookSecret) return false;
   const parts = Object.fromEntries(
@@ -541,6 +351,41 @@ exports.handlePayMongoWebhook = async (req, res) => {
         ]
       );
       console.log(`[PayMongo] Webhook ${eventType} payment=${providerPaymentId} updated=${result.affectedRows}`);
+      if (providerStatus === 'paid') {
+        const [cancelledBookings] = await db.query(
+          `SELECT b.booking_id, b.customer_id
+           FROM payment p
+           INNER JOIN booking b ON b.booking_id = p.booking_id
+           WHERE p.paymongo_payment_id = ?
+             AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
+             AND LOWER(COALESCE(p.status, '')) = 'paid'
+             AND LOWER(COALESCE(b.status, '')) = 'cancelled'`,
+          [providerPaymentId]
+        );
+        for (const booking of cancelledBookings) {
+          try {
+            const refundResult = await processBookingRefund({
+              bookingId: booking.booking_id,
+              reason: 'others',
+              notes: 'Automatic refund for cancelled booking',
+              requireCancelled: true,
+              processWithPayMongo: true
+            });
+            const io = req.app.get('io');
+            if (refundResult.refund && io && io.to) {
+              io.to(`user_customer_${booking.customer_id}`).emit('refundUpdated', {
+                bookingId: booking.booking_id,
+                refundStatus: refundResult.refund.status
+              });
+            }
+            if (!refundResult.success) {
+              console.warn(`[PayMongo] Automatic refund failed for cancelled booking ${booking.booking_id}: ${refundResult.message}`);
+            }
+          } catch (refundError) {
+            console.error(`[PayMongo] Automatic refund error for cancelled booking ${booking.booking_id}:`, refundError);
+          }
+        }
+      }
     } else if (eventType === 'refund.succeeded' || eventType === 'refund.failed' || eventType === 'refund.processing') {
       const refundStatus = eventType.replace('refund.', '');
       const [result] = await db.query(

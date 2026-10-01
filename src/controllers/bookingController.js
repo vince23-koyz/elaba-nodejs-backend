@@ -72,10 +72,6 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
       await connection.commit();
       return { success: true, refund: null };
     }
-    if (!payment.paymongo_payment_id) {
-      await connection.rollback();
-      return { success: false, code: 409, message: 'This GCash payment is missing its PayMongo payment ID' };
-    }
     const amount = Number(payment.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       await connection.rollback();
@@ -86,14 +82,15 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
       SELECT refund_id, paymongo_refund_id, amount, reason, notes, status
       FROM refund
       WHERE payment_id = ? AND booking_id = ?
-        AND LOWER(COALESCE(status, '')) IN ('pending', 'processing', 'succeeded')
+        AND LOWER(COALESCE(status, '')) IN ('pending', 'processing', 'succeeded', 'failed')
       ORDER BY refund_id DESC
       LIMIT 1
       FOR UPDATE
     `, [payment.payment_id, bookingId]);
     if (existing.length) {
       const existingRefund = existing[0];
-      if (!processWithPayMongo || ['processing', 'succeeded'].includes(String(existingRefund.status || '').toLowerCase())) {
+      const existingStatus = String(existingRefund.status || '').toLowerCase();
+      if (!processWithPayMongo || ['processing', 'succeeded'].includes(existingStatus) || (existingStatus === 'failed' && existingRefund.paymongo_refund_id)) {
         await connection.commit();
         return { success: true, refund: existingRefund, duplicate: true };
       }
@@ -102,15 +99,15 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
       notes = processWithPayMongo ? notes : (existingRefund.notes || notes);
       if (processWithPayMongo) {
         await connection.query(
-          'UPDATE refund SET reason = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?',
-          [reason, notes || null, refundId]
+          'UPDATE refund SET reason = ?, notes = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?',
+          [reason, notes || null, 'processing', refundId]
         );
       }
     } else {
       const [insertResult] = await connection.query(`
         INSERT INTO refund (payment_id, booking_id, amount, reason, notes, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
-      `, [payment.payment_id, bookingId, amount, reason, notes || null]);
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [payment.payment_id, bookingId, amount, reason, notes || null, processWithPayMongo ? 'processing' : 'pending']);
       refundId = insertResult.insertId;
     }
     await connection.commit();
@@ -138,10 +135,15 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
     };
   }
 
-  await db.query(
-    'UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ? AND LOWER(COALESCE(status, ?)) = ?',
-    ['processing', refundId, 'pending', 'pending']
-  );
+  if (!payment.paymongo_payment_id) {
+    await db.query('UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?', ['failed', refundId]);
+    return {
+      success: false,
+      code: 409,
+      message: 'This GCash payment is missing its PayMongo payment ID. The automatic refund will retry after payment confirmation.',
+      refund: { refund_id: refundId, paymongo_refund_id: null, amount: Number(payment.amount), status: 'failed' }
+    };
+  }
   const resolvedPaymentId = await paymongoService.resolvePaymentId(payment.paymongo_payment_id);
   if (!resolvedPaymentId) {
     await db.query('UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?', ['failed', refundId]);
@@ -431,6 +433,8 @@ exports.updateBookingStatus = async (req, res) => {
   }
 
   try {
+    let refundResult = null;
+    let refundError = null;
     if (String(status).toLowerCase() === 'cancelled' && requestedCustomerId != null) {
       const [bookingRows] = await db.query(
         'SELECT customer_id, status FROM booking WHERE booking_id = ? LIMIT 1',
@@ -463,6 +467,22 @@ exports.updateBookingStatus = async (req, res) => {
       );
     }
 
+    if (String(status).toLowerCase() === 'cancelled') {
+      try {
+        refundResult = await processCustomerBookingRefund({
+          bookingId: id,
+          customerId: requestedCustomerId ?? null,
+          reason: 'others',
+          notes: 'Automatic refund for cancelled booking',
+          requireCancelled: true,
+          processWithPayMongo: true,
+        });
+      } catch (error) {
+        console.error('Automatic booking refund error:', error);
+        refundError = 'The booking was cancelled, but the automatic refund could not be started.';
+      }
+    }
+
   // Fetch booking info to target proper rooms and optionally customer notification
   const [shopRows] = await db.query(`
     SELECT b.shop_id, b.booking_type, b.customer_id, b.booking_date, s.name AS shop_name
@@ -475,6 +495,15 @@ exports.updateBookingStatus = async (req, res) => {
   const customerId = shopRows && shopRows[0] ? shopRows[0].customer_id : null;
   const bookingDate = shopRows && shopRows[0] ? shopRows[0].booking_date : null;
   const shopName = shopRows && shopRows[0] ? shopRows[0].shop_name : null;
+    if (refundResult?.refund && customerId) {
+      const refundIo = req.app.get('io');
+      if (refundIo && refundIo.to) {
+        refundIo.to(`user_customer_${customerId}`).emit('refundUpdated', {
+          bookingId: Number(id),
+          refundStatus: refundResult.refund.status,
+        });
+      }
+    }
     if (shopId) {
       const io = req.app.get('io');
       emitBookingEvent(io, shopId, 'bookingUpdated', {
@@ -701,7 +730,8 @@ exports.updateBookingStatus = async (req, res) => {
       message: 'Booking status updated successfully',
       booking_id: id,
       new_status: status,
-      refund: null
+      refund: refundResult?.refund || null,
+      refund_error: refundError || (refundResult && !refundResult.success ? refundResult.message : null)
     });
   } catch (err) {
     console.error('Update booking status error:', err);
