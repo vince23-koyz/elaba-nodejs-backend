@@ -4,6 +4,7 @@ const router = express.Router();
 const paymentController = require("../controllers/paymentController");
 
 router.get("/", paymentController.getPayments);
+router.get('/refunds/booking/:bookingId/status', paymentController.syncCustomerRefundStatus);
 router.get("/:id", paymentController.getPaymentById);
 router.post("/", paymentController.createPayment);
 router.put("/:id/status", paymentController.updatePaymentStatus);

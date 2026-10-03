@@ -310,6 +310,75 @@ function verifyPayMongoSignature(rawBody, signatureHeader, webhookSecret) {
   return expected.length === computed.length && crypto.timingSafeEqual(expected, computed);
 }
 
+exports.syncCustomerRefundStatus = async (req, res) => {
+  const { bookingId } = req.params;
+  const customerId = Number(req.query.customer_id);
+  if (!Number.isInteger(customerId) || customerId <= 0) {
+    return res.status(400).json({ success: false, message: 'customer_id required' });
+  }
+
+  try {
+    const [rows] = await db.query(
+      `SELECT b.customer_id, r.refund_id, r.paymongo_refund_id, r.amount, r.status
+       FROM booking b
+       LEFT JOIN payment p ON p.booking_id = b.booking_id
+       LEFT JOIN refund r ON r.payment_id = p.payment_id
+       WHERE b.booking_id = ?
+       ORDER BY r.refund_id DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Booking not found' });
+    if (Number(rows[0].customer_id) !== customerId) {
+      return res.status(403).json({ success: false, message: 'You are not authorized to view this refund' });
+    }
+
+    const refund = rows[0];
+    if (!refund.refund_id || !refund.paymongo_refund_id) {
+      return res.json({
+        success: true,
+        refund: refund.refund_id ? {
+          refund_id: refund.refund_id,
+          amount: Number(refund.amount),
+          status: refund.status
+        } : null
+      });
+    }
+
+    const providerResult = await paymongoService.getRefund(refund.paymongo_refund_id);
+    if (!providerResult.success) {
+      return res.status(502).json({ success: false, message: providerResult.error });
+    }
+
+    const providerStatus = providerResult.refund.attributes.status;
+    if (providerStatus !== refund.status) {
+      await db.query(
+        'UPDATE refund SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE refund_id = ?',
+        [providerStatus, refund.refund_id]
+      );
+      const io = req.app.get('io');
+      if (io && io.to) {
+        io.to(`user_customer_${customerId}`).emit('refundUpdated', {
+          bookingId: Number(bookingId),
+          refundStatus: providerStatus
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      refund: {
+        refund_id: refund.refund_id,
+        amount: Number(refund.amount),
+        status: providerStatus
+      }
+    });
+  } catch (error) {
+    console.error('syncCustomerRefundStatus error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to sync refund status' });
+  }
+};
+
 exports.handlePayMongoWebhook = async (req, res) => {
   const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
   const rawBody = Buffer.isBuffer(req.body) ? req.body : null;
