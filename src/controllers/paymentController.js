@@ -435,7 +435,7 @@ exports.handlePayMongoWebhook = async (req, res) => {
           try {
             const refundResult = await processBookingRefund({
               bookingId: booking.booking_id,
-              reason: 'others',
+              reason: 'requested_by_customer',
               notes: 'Automatic refund for cancelled booking',
               requireCancelled: true,
               processWithPayMongo: true

@@ -472,7 +472,7 @@ exports.updateBookingStatus = async (req, res) => {
         refundResult = await processCustomerBookingRefund({
           bookingId: id,
           customerId: requestedCustomerId ?? null,
-          reason: 'others',
+          reason: 'requested_by_customer',
           notes: 'Automatic refund for cancelled booking',
           requireCancelled: true,
           processWithPayMongo: true,
