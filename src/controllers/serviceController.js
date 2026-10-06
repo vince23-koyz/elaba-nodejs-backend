@@ -29,7 +29,11 @@ exports.createService = async (req, res) => {
 // GET ALL Services
 exports.getServices = async (req, res) => {
   try {
-    const [results] = await db.query('SELECT * FROM services');
+    const [results] = await db.query(`
+      SELECT services.*, shop.name AS shop_name
+      FROM services
+      LEFT JOIN shop ON services.shop_id = shop.shop_id
+    `);
     res.json(results);
   } catch (err) {
     console.error("DB Error (getServices):", err);
