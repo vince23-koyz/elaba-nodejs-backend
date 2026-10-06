@@ -346,7 +346,13 @@ exports.getBookings = async (req, res) => {
        END AS service_date,
       b.booking_date, b.pickup_date, b.created_at, b.status AS booking_status, b.total_amount, 
        b.shop_id, b.customer_id, s.name AS shop_name, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
-       p.payment_id, p.payment_method, p.status AS payment_status, p.date,
+        p.payment_id, p.payment_method, p.amount AS payment_amount, p.status AS payment_status, p.date,
+       EXISTS (
+         SELECT 1
+         FROM refund active_refund
+         WHERE active_refund.payment_id = p.payment_id
+           AND LOWER(COALESCE(active_refund.status, '')) IN ('pending', 'processing', 'succeeded')
+       ) AS has_active_refund,
       r.refund_id, r.amount AS refund_amount, r.status AS refund_status,
        b.service_id, srv.offers AS service_name,
       d.delivery_id, d.pickup_address, d.delivery_address, d.delivery_time, d.status AS delivery_status
