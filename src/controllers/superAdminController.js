@@ -661,7 +661,7 @@ exports.getRevenueAnalytics = async (req, res) => {
     const paidPaymentFilter = `
       p.date >= ? AND p.date < DATE_ADD(?, INTERVAL 1 DAY)
       AND LOWER(p.status) IN ('paid', 'success', 'succeeded', 'completed')
-      AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'rejected')
+      AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'declined', 'rejected')
     `;
     const params = [fromDate, toDate];
 
