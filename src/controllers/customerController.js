@@ -429,6 +429,32 @@ exports.updateCustomer = async (req, res) => {
   const { customerId } = req.params;
   const { first_name, last_name, username, street, zone, barangay, city, profile_picture, status } = req.body;
 
+  const requiredFields = [
+    ['first_name', first_name],
+    ['last_name', last_name],
+    ['username', username],
+    ['street', street],
+    ['zone', zone],
+    ['barangay', barangay],
+    ['city', city],
+  ];
+  const missingField = requiredFields.find(
+    ([, value]) => typeof value !== 'string' || !value.trim()
+  );
+  if (missingField) {
+    return res.status(400).json({
+      success: false,
+      message: `${missingField[0]} is required`
+    });
+  }
+
+  if (/\d/.test(first_name) || /\d/.test(last_name)) {
+    return res.status(400).json({
+      success: false,
+      message: 'First name and last name cannot contain numbers'
+    });
+  }
+
   try {
     // Check if customer exists
     const checkSql = 'SELECT customer_id FROM customer WHERE customer_id = ?';
@@ -441,7 +467,15 @@ exports.updateCustomer = async (req, res) => {
     // Update customer information
     let updateSql = `UPDATE customer 
       SET first_name = ?, last_name = ?, username = ?, street = ?, zone = ?, barangay = ?, city = ?`;
-    let queryParams = [first_name, last_name, username, street, zone, barangay, city];
+    let queryParams = [
+      first_name.trim(),
+      last_name.trim(),
+      username.trim(),
+      street.trim(),
+      zone.trim(),
+      barangay.trim(),
+      city.trim()
+    ];
 
     // Add profile_picture to update if provided
     if (profile_picture !== undefined) {
