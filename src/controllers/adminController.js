@@ -169,7 +169,7 @@ exports.getAdmins = async (req, res) => {
 exports.getAdminById = async (req, res) => {
   const { id } = req.params;
   try {
-    const sql = 'SELECT * FROM admin WHERE admin_id = ?';
+    const sql = 'SELECT admin_id, first_name, last_name, street, zone, barangay, city, phone_number, created_at FROM admin WHERE admin_id = ?';
     const [results] = await db.query(sql, [id]);
 
     if (results.length === 0) return res.status(404).json({ message: 'Admin not found' });
