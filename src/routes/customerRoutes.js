@@ -24,6 +24,7 @@ const customerLoginLimiter = rateLimit({
 router.post('/', customerController.registerCustomer);
 router.post('/check-phone', customerController.checkPhone);  // POST /api/customers/check-phone (secure phone verification)
 router.post('/forgot-password', customerController.forgotPassword);
+router.post('/change-password', customerController.changePassword);
 router.post('/verify-otp', customerController.verifyOTP);
 router.post('/login', customerLoginLimiter, customerController.loginCustomer);
 router.get('/', customerController.getAllCustomers); // GET all customers (for dashboard)

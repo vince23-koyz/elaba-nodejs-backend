@@ -351,6 +351,78 @@ exports.getCustomer = async (req, res) => {
   }
 };
 
+exports.changePassword = async (req, res) => {
+  const { phone_number, current_password, new_password } = req.body;
+
+  if (
+    typeof phone_number !== 'string' ||
+    !phone_number.trim() ||
+    typeof current_password !== 'string' ||
+    !current_password ||
+    typeof new_password !== 'string' ||
+    !new_password
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: 'Phone number, current password, and new password are required'
+    });
+  }
+
+  if (new_password.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'New password must be at least 6 characters long'
+    });
+  }
+
+  try {
+    const [customers] = await db.query(
+      'SELECT customer_id, password_hash FROM customer WHERE phone_number = ? LIMIT 1',
+      [phone_number.trim()]
+    );
+
+    if (customers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer account not found'
+      });
+    }
+
+    const customer = customers[0];
+    const isCurrentPasswordValid = await bcrypt.compare(current_password, customer.password_hash);
+    if (!isCurrentPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    const newPasswordHash = await bcrypt.hash(new_password, 10);
+    const [updateResult] = await db.query(
+      'UPDATE customer SET password_hash = ? WHERE customer_id = ? AND password_hash = ?',
+      [newPasswordHash, customer.customer_id, customer.password_hash]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Password updated successfully'
+    });
+  } catch (err) {
+    console.error('DB Error (changePassword):', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Unable to update password'
+    });
+  }
+};
+
 exports.updateCustomer = async (req, res) => {
   const { customerId } = req.params;
   const { first_name, last_name, username, street, zone, barangay, city, profile_picture, status } = req.body;
