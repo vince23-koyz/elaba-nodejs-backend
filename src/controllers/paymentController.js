@@ -220,7 +220,7 @@ exports.getShopSales = async (req, res) => {
     const eligiblePaymentFilter = `
       p.shop_id = ?
       AND LOWER(p.status) IN ('paid', 'success', 'succeeded', 'completed')
-      AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'rejected')
+      AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'declined', 'rejected')
       AND NOT EXISTS (
         SELECT 1
         FROM refund r
