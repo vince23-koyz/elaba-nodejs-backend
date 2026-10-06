@@ -393,6 +393,7 @@ exports.changePassword = async (req, res) => {
     if (!isCurrentPasswordValid) {
       return res.status(401).json({
         success: false,
+        code: 'INCORRECT_CURRENT_PASSWORD',
         message: 'Current password is incorrect'
       });
     }
@@ -406,6 +407,7 @@ exports.changePassword = async (req, res) => {
     if (updateResult.affectedRows === 0) {
       return res.status(401).json({
         success: false,
+        code: 'INCORRECT_CURRENT_PASSWORD',
         message: 'Current password is incorrect'
       });
     }
