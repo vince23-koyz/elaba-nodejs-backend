@@ -212,13 +212,13 @@ exports.updatePaymentStatus = async (req, res) => {
   }
 };
 
-// Get total paid sales for a shop (sum of payment.amount where status = 'paid')
+// Get paid sales for a shop, excluding payments with an active or completed refund.
 exports.getShopSales = async (req, res) => {
   const { shopId } = req.params;
   if (!shopId) return res.status(400).json({ success: false, message: 'shopId required' });
   try {
     const [rows] = await db.query(
-      "SELECT COALESCE(SUM(p.amount), 0) AS total FROM payment p INNER JOIN booking b ON b.booking_id = p.booking_id WHERE p.shop_id = ? AND LOWER(p.status) IN ('paid', 'success', 'succeeded', 'completed') AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'rejected')",
+      "SELECT COALESCE(SUM(p.amount), 0) AS total FROM payment p INNER JOIN booking b ON b.booking_id = p.booking_id WHERE p.shop_id = ? AND LOWER(p.status) IN ('paid', 'success', 'succeeded', 'completed') AND LOWER(COALESCE(b.status, '')) NOT IN ('cancelled', 'canceled', 'rejected') AND NOT EXISTS (SELECT 1 FROM refund r WHERE r.payment_id = p.payment_id AND LOWER(COALESCE(r.status, '')) IN ('pending', 'processing', 'succeeded'))",
       [shopId]
     );
     const total = rows && rows[0] ? Number(rows[0].total || 0) : 0;
