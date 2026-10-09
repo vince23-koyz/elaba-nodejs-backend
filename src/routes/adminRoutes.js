@@ -6,7 +6,7 @@ const adminController = require('../controllers/adminController');
 
 const adminLoginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 100,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => {

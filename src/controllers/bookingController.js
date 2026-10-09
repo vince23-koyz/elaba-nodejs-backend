@@ -2,13 +2,12 @@ const db = require('../config/db');
 const { sendNotification } = require('../service/notificationService');
 const paymongoService = require('../service/paymongoService');
 
-// Helper: get admin_id and device token for a given shop_id
+// Helper: get the admin account for a given shop_id
 async function getAdminInfoByShop(shopId) {
   try {
     const [rows] = await db.query(`
-      SELECT s.admin_id, dt.token as device_token
+      SELECT s.admin_id
       FROM shop s
-      LEFT JOIN device_tokens dt ON dt.account_id = s.admin_id AND dt.account_type = 'admin'
       WHERE s.shop_id = ?
       LIMIT 1
     `, [shopId]);
@@ -286,7 +285,6 @@ exports.createBooking = async (req, res) => {
           bookingId: result.insertId,
           title: 'New Service Booking',
           message,
-          deviceToken: adminInfo.device_token || undefined,
         });
 
         // Emit real-time notification to the admin room
@@ -567,7 +565,6 @@ exports.updateBookingStatus = async (req, res) => {
             bookingId: id,
             title: 'Booking Cancelled',
             message,
-            deviceToken: adminInfo.device_token || undefined,
             replaceExisting: true,
             existingTitles: ['New Service Booking', 'Booking Cancelled'],
           });
@@ -843,7 +840,6 @@ exports.updateBookingDate = async (req, res) => {
           bookingId: id,
           title: 'Booking Rescheduled',
           message: notifMsg,
-          deviceToken: adminInfo.device_token || undefined,
         });
 
         // Emit real-time notification to the admin room
