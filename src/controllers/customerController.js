@@ -619,12 +619,13 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    await OtpService.sendOtp(matchedPhone);
+    const otpResult = await OtpService.sendOtp(matchedPhone);
 
     res.json({
       success: true,
       message: 'OTP sent successfully',
-      customer_id: customer.customer_id
+      customer_id: customer.customer_id,
+      ...(otpResult.otp ? { otp: otpResult.otp } : {}),
     });
   } catch (err) {
     console.error('Error sending customer OTP:', err.message || err);
