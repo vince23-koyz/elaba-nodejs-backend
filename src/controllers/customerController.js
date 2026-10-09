@@ -615,7 +615,7 @@ exports.forgotPassword = async (req, res) => {
     if (!customer) {
       return res.status(404).json({
         success: false,
-        message: 'Customer not found'
+        message: 'No account was found with this phone number.'
       });
     }
 
