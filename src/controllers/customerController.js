@@ -1,8 +1,8 @@
 const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
 
 const db = require('../config/db'); // Use the shared db connection
 const { normalizePhoneNumber } = require('../utils/phoneUtils');
+const OtpService = require('../service/otpService');
 
 const failedLoginAttempts = new Map();
 const FAILED_LOGIN_LIMIT = 5;
@@ -619,27 +619,18 @@ exports.forgotPassword = async (req, res) => {
       });
     }
 
-    const otp = crypto.randomInt(100000, 1000000).toString();
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-    await db.query('DELETE FROM otp_verification WHERE phone_number = ?', [matchedPhone]);
-    await db.query(
-      'INSERT INTO otp_verification (phone_number, otp_code, expires_at) VALUES (?, ?, ?)',
-      [matchedPhone, otp, expiresAt]
-    );
-    console.log(`🔐 Generated OTP: ${otp} for customer: ${customer.customer_id}`);
+    await OtpService.sendOtp(matchedPhone);
 
     res.json({
       success: true,
-      message: 'OTP generated successfully',
-      otp,
+      message: 'OTP sent successfully',
       customer_id: customer.customer_id
     });
   } catch (err) {
-    console.error("DB Error (forgotPassword):", err);
-    res.status(500).json({
+    console.error('Error sending customer OTP:', err.message || err);
+    res.status(err.message === 'Semaphore SMS configuration is missing' ? 503 : 502).json({
       success: false,
-      message: 'Database error',
-      error: err.message
+      message: 'Unable to send OTP SMS. Please try again later.'
     });
   }
-}
+};

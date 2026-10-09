@@ -73,17 +73,24 @@ const OtpService = {
       `This code expires in ${DISPLAY_EXPIRATION}. ` +
       `If you did not request this, please ignore this message.`;
 
-    // 📨 Send SMS only when enabled
-    if (OTP_SMS_ENABLED) {
-      await sendSms(phoneNumber, message);
-      console.log(
-        `📲 OTP SMS sent - OTP for ${phoneNumber}: ${otpCode}`
+    if (!OTP_SMS_ENABLED) {
+      await db.query(
+        'DELETE FROM otp_verification WHERE phone_number = ?',
+        [phoneNumber]
       );
-    } else {
-      console.log(
-        `🔕 OTP SMS disabled - OTP for ${phoneNumber}: ${otpCode}`
-      );
+      throw new Error('Semaphore SMS configuration is missing');
     }
+
+    try {
+      await sendSms(phoneNumber, message);
+    } catch (error) {
+      await db.query(
+        'DELETE FROM otp_verification WHERE phone_number = ?',
+        [phoneNumber]
+      );
+      throw error;
+    }
+    console.log(`📲 OTP SMS accepted by Semaphore for ${phoneNumber}`);
 
     return {
       success: true,
