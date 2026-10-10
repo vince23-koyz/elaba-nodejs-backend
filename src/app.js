@@ -247,7 +247,7 @@ io.on('connection', (socket) => {
 
     const messageWithTimestamp = {
       ...messageData,
-      id: Date.now(),
+      id: messageData.message_id || Date.now(),
       created_at: new Date().toISOString(),
     };
 
