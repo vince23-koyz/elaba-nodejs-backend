@@ -287,6 +287,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('messageUnsent', (messageData) => {
+    console.log('🗑️ Message unsent:', messageData);
+
+    const senderRoom = `user_${messageData.sender_type}_${messageData.sender_id}`;
+    const receiverRoom = `user_${messageData.receiver_type}_${messageData.receiver_id}`;
+    const customerId = messageData.sender_type === 'customer' ? messageData.sender_id : messageData.receiver_id;
+    const adminId = messageData.sender_type === 'admin' ? messageData.sender_id : messageData.receiver_id;
+    const conversationId = `shop_${messageData.shop_id}_customer_${customerId}_admin_${adminId}`;
+
+    io.to(senderRoom).emit('messageUnsent', messageData);
+    io.to(receiverRoom).emit('messageUnsent', messageData);
+    io.to(conversationId).emit('messageUnsent', messageData);
+  });
+
   socket.on('disconnect', async (reason) => {
     console.log(`🔴 User disconnected: ${socket.id} (Reason: ${reason})`);
     if (socket.userData) {

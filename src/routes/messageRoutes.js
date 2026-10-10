@@ -6,7 +6,8 @@ const {
   getConversation,
   getMessagesByShop,
   getConversations,
-  markMessagesAsRead
+  markMessagesAsRead,
+  unsendMessage
 } = require("../controllers/messageController");
 
 // Create a new message
@@ -24,6 +25,7 @@ router.get("/conversations/:userType/:userId", getConversations);
 // Mark all messages as read for a conversation (when user opens chat)
 // Expects body: { senderId, receiverId, shopId }
 router.put("/mark-read", markMessagesAsRead);
+router.put("/:messageId/unsend", unsendMessage);
 
 // Test endpoint to create sample data
 router.post("/test-data", (req, res) => {

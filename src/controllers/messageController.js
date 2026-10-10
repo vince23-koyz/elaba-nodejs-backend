@@ -39,8 +39,9 @@ const getConversation = async (req, res) => {
         messages.message_id, messages.sender_type, messages.sender_id,
         messages.receiver_type, messages.receiver_id, messages.shop_id,
         messages.message_text, messages.is_read, messages.created_at,
+        messages.is_unsent, messages.unsent_at,
         messages.reply_to_message_id,
-        replied.message_text AS reply_to_message_text
+        CASE WHEN replied.is_unsent = 1 THEN NULL ELSE replied.message_text END AS reply_to_message_text
       FROM messages 
       LEFT JOIN messages replied ON replied.message_id = messages.reply_to_message_id
       WHERE messages.shop_id = ? 
@@ -70,8 +71,9 @@ const getMessagesByShop = async (req, res) => {
         messages.message_id, messages.sender_type, messages.sender_id,
         messages.receiver_type, messages.receiver_id, messages.shop_id,
         messages.message_text, messages.is_read, messages.created_at,
+        messages.is_unsent, messages.unsent_at,
         messages.reply_to_message_id,
-        replied.message_text AS reply_to_message_text
+        CASE WHEN replied.is_unsent = 1 THEN NULL ELSE replied.message_text END AS reply_to_message_text
       FROM messages 
       LEFT JOIN messages replied ON replied.message_id = messages.reply_to_message_id
       WHERE messages.shop_id = ? 
@@ -197,10 +199,45 @@ const markMessagesAsRead = async (req, res) => {
   }
 };
 
+const unsendMessage = async (req, res) => {
+  const { messageId } = req.params;
+  const { sender_id, sender_type } = req.body;
+
+  if (!messageId || !sender_id || !sender_type) {
+    return res.status(400).json({ error: "messageId, sender_id, and sender_type are required" });
+  }
+
+  try {
+    const [result] = await db.query(
+      `UPDATE messages
+       SET is_unsent = 1, unsent_at = NOW()
+       WHERE message_id = ? AND sender_id = ? AND sender_type = ? AND is_unsent = 0`,
+      [messageId, sender_id, sender_type]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Message not found or cannot be unsent" });
+    }
+
+    const [rows] = await db.query(
+      `SELECT message_id, sender_type, sender_id, receiver_type, receiver_id,
+              shop_id, is_unsent, unsent_at
+       FROM messages WHERE message_id = ?`,
+      [messageId]
+    );
+
+    res.json({ message: rows[0] });
+  } catch (err) {
+    console.error("Error unsending message:", err);
+    res.status(500).json({ error: "Database error" });
+  }
+};
+
 module.exports = {
   createMessage,
   getConversation,
   getMessagesByShop,
   getConversations,
-  markMessagesAsRead
+  markMessagesAsRead,
+  unsendMessage
 };
