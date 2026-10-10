@@ -3,7 +3,7 @@ const { buildMarkReadQuery } = require("../utils/messageReadUtils");
 
 // ✅ Create new message
 const createMessage = async (req, res) => {
-  const { sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read = 0 } = req.body;
+  const { sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read = 0, reply_to_message_id = null } = req.body;
 
   if (!sender_type || !sender_id || !receiver_type || !receiver_id || !shop_id || !message_text) {
     return res.status(400).json({ error: "All fields are required" });
@@ -11,12 +11,12 @@ const createMessage = async (req, res) => {
 
   try {
     const sql = `
-      INSERT INTO messages (sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read, reply_to_message_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [result] = await db.query(sql, [
-      sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read
+      sender_type, sender_id, receiver_type, receiver_id, shop_id, message_text, is_read, reply_to_message_id
     ]);
 
     res.status(201).json({ 
@@ -36,16 +36,20 @@ const getConversation = async (req, res) => {
   try {
     const sql = `
       SELECT 
-        message_id, sender_type, sender_id, receiver_type, receiver_id, shop_id, 
-        message_text, is_read, created_at
+        messages.message_id, messages.sender_type, messages.sender_id,
+        messages.receiver_type, messages.receiver_id, messages.shop_id,
+        messages.message_text, messages.is_read, messages.created_at,
+        messages.reply_to_message_id,
+        replied.message_text AS reply_to_message_text
       FROM messages 
-      WHERE shop_id = ? 
+      LEFT JOIN messages replied ON replied.message_id = messages.reply_to_message_id
+      WHERE messages.shop_id = ? 
       AND (
-        (sender_type = 'customer' AND sender_id = ? AND receiver_type = 'admin' AND receiver_id = ?)
+        (messages.sender_type = 'customer' AND messages.sender_id = ? AND messages.receiver_type = 'admin' AND messages.receiver_id = ?)
         OR 
-        (sender_type = 'admin' AND sender_id = ? AND receiver_type = 'customer' AND receiver_id = ?)
+        (messages.sender_type = 'admin' AND messages.sender_id = ? AND messages.receiver_type = 'customer' AND messages.receiver_id = ?)
       )
-      ORDER BY created_at ASC
+      ORDER BY messages.created_at ASC
     `;
 
     const [results] = await db.query(sql, [shopId, customerId, adminId, adminId, customerId]);
@@ -63,11 +67,15 @@ const getMessagesByShop = async (req, res) => {
   try {
     const sql = `
       SELECT 
-        message_id, sender_type, sender_id, receiver_type, receiver_id, shop_id,
-        message_text, is_read, created_at
+        messages.message_id, messages.sender_type, messages.sender_id,
+        messages.receiver_type, messages.receiver_id, messages.shop_id,
+        messages.message_text, messages.is_read, messages.created_at,
+        messages.reply_to_message_id,
+        replied.message_text AS reply_to_message_text
       FROM messages 
-      WHERE shop_id = ? 
-      ORDER BY created_at DESC
+      LEFT JOIN messages replied ON replied.message_id = messages.reply_to_message_id
+      WHERE messages.shop_id = ? 
+      ORDER BY messages.created_at DESC
     `;
     const [results] = await db.query(sql, [shopId]);
     res.json(results);
