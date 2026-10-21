@@ -1,5 +1,6 @@
 // eLaba-backend/src/controllers/serviceController.js
 const db = require('../config/db');
+const DEFAULT_SERVICE_PACKAGE = 'Regular Service';
 
 const validateWeightPricing = (maxKg, priceTiers) => {
   const normalizedMaxKg = Number(maxKg);
@@ -46,7 +47,7 @@ const validateWeightPricing = (maxKg, priceTiers) => {
 exports.createService = async (req, res) => {
   console.log("REQ.BODY:", req.body);
 
-  const { offers, quantity, description, price, package: packageName, shop_id, status, max_kg, price_tiers } = req.body;
+  const { offers, quantity, description, price, shop_id, status, max_kg, price_tiers } = req.body;
 
   if (!shop_id) {
     return res.status(400).json({ message: "Shop ID is required" });
@@ -63,7 +64,7 @@ exports.createService = async (req, res) => {
       (offers, quantity, description, price, package, shop_id, status, max_kg, price_tiers)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await db.query(sql, [
-      offers, quantity, description, startingPrice, packageName, shop_id, status,
+      offers, quantity, description, startingPrice, DEFAULT_SERVICE_PACKAGE, shop_id, status,
       weightPricing.maxKg, JSON.stringify(weightPricing.tiers),
     ]);
 
@@ -131,7 +132,7 @@ exports.getServicesByShop = async (req, res) => {
 // UPDATE Service
 exports.updateService = async (req, res) => {
   const { id } = req.params;
-  const { offers, quantity, description, package: packageName, status, max_kg, price_tiers } = req.body;
+  const { offers, quantity, description, status, max_kg, price_tiers } = req.body;
 
   const weightPricing = validateWeightPricing(max_kg, price_tiers);
   if (weightPricing.error) {
@@ -144,7 +145,7 @@ exports.updateService = async (req, res) => {
                 WHERE service_id=?`;
 
     const [result] = await db.query(sql, [
-      offers, quantity, description, weightPricing.tiers[0].price, packageName, status,
+      offers, quantity, description, weightPricing.tiers[0].price, DEFAULT_SERVICE_PACKAGE, status,
       weightPricing.maxKg, JSON.stringify(weightPricing.tiers), id,
     ]);
     
