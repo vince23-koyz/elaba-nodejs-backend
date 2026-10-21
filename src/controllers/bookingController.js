@@ -33,6 +33,181 @@ async function emitBookingEvent(io, shopId, eventName, payload = {}) {
   }
 }
 
+async function activatePaidGcashBooking(bookingId, io) {
+  const [result] = await db.query(
+    `UPDATE booking b
+     INNER JOIN payment p ON p.booking_id = b.booking_id
+     SET b.status = 'Pending'
+     WHERE b.booking_id = ?
+       AND LOWER(COALESCE(b.status, '')) = 'payment_pending'
+       AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
+       AND LOWER(COALESCE(p.status, '')) = 'paid'`,
+    [bookingId]
+  );
+  if (!result.affectedRows) return false;
+
+  const [rows] = await db.query(
+    `SELECT b.booking_id, b.shop_id, b.customer_id, s.admin_id,
+            c.first_name, c.last_name, srv.offers AS service_name
+     FROM booking b
+     INNER JOIN shop s ON s.shop_id = b.shop_id
+     INNER JOIN customer c ON c.customer_id = b.customer_id
+     LEFT JOIN services srv ON srv.service_id = b.service_id
+     WHERE b.booking_id = ?
+     LIMIT 1`,
+    [bookingId]
+  );
+  const booking = rows[0];
+  if (!booking) return true;
+
+  emitBookingEvent(io, booking.shop_id, 'bookingCreated', {
+    bookingId: Number(booking.booking_id),
+    status: 'Pending',
+  });
+  if (io && io.to) {
+    io.to('role_superadmin').emit('bookingCreated', {
+      shopId: booking.shop_id,
+      bookingId: Number(booking.booking_id),
+      status: 'Pending',
+      at: new Date().toISOString(),
+    });
+  }
+  if (booking.admin_id) {
+    try {
+      const customerName = `${booking.first_name || ''} ${booking.last_name || ''}`.trim() || 'A customer';
+      const serviceName = booking.service_name || 'a service';
+      const { savedNotification } = await sendNotification({
+        accountId: booking.admin_id,
+        accountType: 'admin',
+        bookingId: booking.booking_id,
+        title: 'New Service Booking',
+        message: `A new service booking has just been received from ${customerName} for ${serviceName}! Please check the details and confirm the booking to begin processing.`,
+      });
+      if (savedNotification && io && io.to) {
+        io.to(`user_admin_${booking.admin_id}`).emit('newNotification', savedNotification);
+      }
+    } catch (error) {
+      console.error('Error sending paid GCash booking notification:', error);
+    }
+  }
+  return true;
+}
+
+async function discardFailedGcashBooking(bookingId, customerId = null) {
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT b.booking_id, b.customer_id, b.status AS booking_status,
+              p.payment_id, p.status AS payment_status, p.payment_method
+       FROM booking b
+       INNER JOIN payment p ON p.booking_id = b.booking_id
+       WHERE b.booking_id = ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM payment active_payment
+           WHERE active_payment.booking_id = b.booking_id
+             AND LOWER(COALESCE(active_payment.status, '')) NOT IN ('failed', 'cancelled')
+         )
+         AND LOWER(COALESCE(p.status, '')) IN ('failed', 'cancelled')
+       LIMIT 1
+       FOR UPDATE`,
+      [bookingId]
+    );
+    if (!rows.length) {
+      await connection.commit();
+      return { deleted: false, reason: 'not_found' };
+    }
+
+    const booking = rows[0];
+    if (customerId != null && Number(booking.customer_id) !== Number(customerId)) {
+      await connection.rollback();
+      return { deleted: false, reason: 'unauthorized' };
+    }
+    if (
+      String(booking.payment_method || '').toLowerCase() !== 'gcash' ||
+      !['failed', 'cancelled'].includes(String(booking.payment_status || '').toLowerCase())
+    ) {
+      await connection.commit();
+      return { deleted: false, reason: 'payment_not_failed' };
+    }
+    if (!['payment_pending', 'pending', 'cancelled'].includes(String(booking.booking_status || '').toLowerCase())) {
+      await connection.commit();
+      return { deleted: false, reason: 'booking_already_advanced' };
+    }
+
+    const [refundRows] = await connection.query(
+      `SELECT refund_id, paymongo_refund_id, status
+       FROM refund
+       WHERE booking_id = ?
+       FOR UPDATE`,
+      [booking.booking_id]
+    );
+    if (refundRows.some((refund) =>
+      refund.paymongo_refund_id ||
+      ['processing', 'succeeded'].includes(String(refund.status || '').toLowerCase())
+    )) {
+      await connection.commit();
+      return { deleted: false, reason: 'refund_already_submitted' };
+    }
+
+    await connection.query('DELETE FROM refund WHERE booking_id = ?', [booking.booking_id]);
+    await connection.query('DELETE FROM booking WHERE booking_id = ?', [booking.booking_id]);
+    await connection.commit();
+    return { deleted: true, booking_id: booking.booking_id };
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) { /* rollback best effort */ }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function discardUnstartedGcashBooking(bookingId, customerId) {
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(
+      `SELECT b.booking_id, b.customer_id, b.status
+       FROM booking b
+       WHERE b.booking_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [bookingId]
+    );
+    if (!rows.length) {
+      await connection.commit();
+      return { deleted: false, reason: 'not_found' };
+    }
+    const booking = rows[0];
+    if (Number(booking.customer_id) !== Number(customerId)) {
+      await connection.rollback();
+      return { deleted: false, reason: 'unauthorized' };
+    }
+    if (String(booking.status || '').toLowerCase() !== 'payment_pending') {
+      await connection.commit();
+      return { deleted: false, reason: 'booking_already_advanced' };
+    }
+    const [paymentRows] = await connection.query(
+      'SELECT payment_id FROM payment WHERE booking_id = ? LIMIT 1 FOR UPDATE',
+      [bookingId]
+    );
+    if (paymentRows.length) {
+      await connection.commit();
+      return { deleted: false, reason: 'payment_record_exists' };
+    }
+
+    await connection.query('DELETE FROM booking WHERE booking_id = ?', [bookingId]);
+    await connection.commit();
+    return { deleted: true, booking_id: Number(bookingId) };
+  } catch (error) {
+    try { await connection.rollback(); } catch (_) { /* rollback best effort */ }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function processCustomerBookingRefund({ bookingId, customerId, reason = null, notes, requireCancelled = false, processWithPayMongo = false }) {
   const connection = await db.getConnection();
   let refundId;
@@ -216,6 +391,9 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
 }
 
 exports.processBookingRefund = processCustomerBookingRefund;
+exports.activatePaidGcashBooking = activatePaidGcashBooking;
+exports.discardFailedGcashBooking = discardFailedGcashBooking;
+exports.discardUnstartedGcashBooking = discardUnstartedGcashBooking;
 
 // CREATE Booking
 exports.createBooking = async (req, res) => {
@@ -274,6 +452,7 @@ exports.createBooking = async (req, res) => {
     if (!serviceRows.length) {
       return res.status(404).json({ message: 'Service not found for this shop.' });
     }
+    const isPaymentDraft = String(status).toLowerCase() === 'payment_pending';
 
     let selectedWeight = null;
     if (estimated_weight_kg !== undefined && estimated_weight_kg !== null) {
@@ -330,25 +509,26 @@ exports.createBooking = async (req, res) => {
 
     const [result] = await db.query(sql, params);
 
-    // Emit socket event for real-time updates (admin + superadmin)
-    const io = req.app.get('io');
-    emitBookingEvent(io, shop_id, 'bookingCreated', {
-      bookingId: result.insertId,
-      status,
-    });
-    if (io && io.to) {
-      io.to('role_superadmin').emit('bookingCreated', {
-        shopId: shop_id,
+    if (!isPaymentDraft) {
+      // Emit socket event for real-time updates (admin + superadmin)
+      const io = req.app.get('io');
+      emitBookingEvent(io, shop_id, 'bookingCreated', {
         bookingId: result.insertId,
         status,
-        at: new Date().toISOString(),
       });
-    }
+      if (io && io.to) {
+        io.to('role_superadmin').emit('bookingCreated', {
+          shopId: shop_id,
+          bookingId: result.insertId,
+          status,
+          at: new Date().toISOString(),
+        });
+      }
 
-    // Send Firebase notification to admin
-    try {
-      const adminInfo = await getAdminInfoByShop(shop_id);
-      if (adminInfo && adminInfo.admin_id) {
+      // Send Firebase notification to admin
+      try {
+        const adminInfo = await getAdminInfoByShop(shop_id);
+        if (adminInfo && adminInfo.admin_id) {
         // Fetch customer name and service name
         let customerName = '';
         let serviceName = '';
@@ -383,9 +563,10 @@ exports.createBooking = async (req, res) => {
         if (io && savedNotification) {
           io.to(userRoom).emit('newNotification', savedNotification);
         }
+        }
+      } catch (notifErr) {
+        console.error('Error sending new booking notification:', notifErr);
       }
-    } catch (notifErr) {
-      console.error('Error sending new booking notification:', notifErr);
     }
 
     res.status(201).json({
@@ -464,6 +645,7 @@ exports.getBookings = async (req, res) => {
       whereClauses.push('b.customer_id = ?');
       queryParams.push(customer_id);
     }
+    whereClauses.push(`LOWER(COALESCE(b.status, '')) <> 'payment_pending'`);
     if (status) {
       whereClauses.push('LOWER(b.status) = LOWER(?)');
       queryParams.push(status);

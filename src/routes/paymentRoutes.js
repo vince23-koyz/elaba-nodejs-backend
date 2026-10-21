@@ -14,6 +14,7 @@ router.get('/shop/:shopId/total', paymentController.getShopSales);
 // PayMongo GCash Payment Routes - Temporarily disabled, returns 503 status
 router.post("/gcash/create", paymentController.createGCashPayment);
 router.get("/gcash/status/:paymentIntentId", paymentController.checkPaymentStatus);
+router.post("/gcash/cleanup/:bookingId", paymentController.cleanupFailedGCashBooking);
 
 // Checkout Sessions redirect callbacks (sandbox/test)
 router.get('/gcash/checkout/success', paymentController.checkoutSuccess);

@@ -317,6 +317,25 @@ class PayMongoService {
     if (!this.isRealMode()) {
       return this._mockStatus(paymentIntentId);
     }
+    if (String(paymentIntentId).startsWith('pay_')) {
+      try {
+        const response = await this.secretClient.get(`/payments/${paymentIntentId}`);
+        const payment = response.data?.data;
+        const paymentStatus = String(payment?.attributes?.status || '').toLowerCase();
+        const status = ['paid', 'succeeded'].includes(paymentStatus)
+          ? 'succeeded'
+          : ['failed', 'canceled', 'cancelled'].includes(paymentStatus)
+            ? 'canceled'
+            : 'processing';
+        return { success: true, status, paymongoPaymentId: payment.id, data: payment };
+      } catch (error) {
+        console.error('[PayMongo] Failed to fetch payment status:', error.response?.data || error.message);
+        return {
+          success: false,
+          error: error.response?.data?.errors?.[0]?.detail || 'Failed to check payment status'
+        };
+      }
+    }
     // Sandbox/test: depending on mode, fetch checkout session or payment intent
     if (this.mode === 'test') {
       if (!this.isRealMode()) {
@@ -333,7 +352,7 @@ class PayMongoService {
           else if (['expired', 'failed', 'cancelled', 'canceled'].includes(String(attrs.status || '').toLowerCase())) status = 'canceled';
           const piStatus = attrs.payment_intent?.attributes?.status || attrs.payment_intent_status;
           if (piStatus === 'succeeded') status = 'succeeded';
-          else if (piStatus === 'canceled' || piStatus === 'cancelled') status = 'canceled';
+          else if (['failed', 'canceled', 'cancelled'].includes(String(piStatus || '').toLowerCase())) status = 'canceled';
           if (status === 'processing') {
             status = this._checkoutSessionsStatus.get(paymentIntentId) || 'processing';
           }
@@ -352,7 +371,8 @@ class PayMongoService {
       } else {
         try {
           const intent = await this._getPaymentIntent(paymentIntentId);
-          const status = intent.attributes.status;
+          const intentStatus = String(intent.attributes.status || '').toLowerCase();
+          const status = ['failed', 'canceled', 'cancelled'].includes(intentStatus) ? 'canceled' : intentStatus;
           const paymongoPaymentId = status === 'succeeded'
             ? await this._resolveCheckoutPaymentId({ attributes: { payment_intent: paymentIntentId } })
             : null;
@@ -365,7 +385,8 @@ class PayMongoService {
     }
     try {
       const intent = await this._getPaymentIntent(paymentIntentId);
-      const status = intent.attributes.status;
+      const intentStatus = String(intent.attributes.status || '').toLowerCase();
+      const status = ['failed', 'canceled', 'cancelled'].includes(intentStatus) ? 'canceled' : intentStatus;
       const paymongoPaymentId = status === 'succeeded'
         ? await this._resolveCheckoutPaymentId({ attributes: { payment_intent: paymentIntentId } })
         : null;

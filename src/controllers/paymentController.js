@@ -120,6 +120,10 @@ exports.updatePaymentStatus = async (req, res) => {
     );
     paymentRow = rows && rows[0] ? rows[0] : null;
 
+    if (nextStatus === 'paid' && String(paymentRow?.payment_method || '').toLowerCase() === 'gcash' && paymentRow?.booking_id) {
+      await activatePaidGcashBooking(paymentRow.booking_id, req.app.get('io'));
+    }
+
     // If marking as paid and not yet linked to a transaction, create one and link it
     if (nextStatus === 'paid') {
       if (paymentRow) {
@@ -282,7 +286,12 @@ exports.updatePaymentTransaction = async (req, res) => {
 
 // GCash Payment (Hybrid: real or mock)
 const paymongoService = require('../service/paymongoService');
-const { processBookingRefund } = require('./bookingController');
+const {
+  processBookingRefund,
+  activatePaidGcashBooking,
+  discardFailedGcashBooking,
+  discardUnstartedGcashBooking,
+} = require('./bookingController');
 
 exports.createGCashPayment = async (req, res) => {
   const { amount, description, customerInfo, bookingId } = req.body;
@@ -358,6 +367,109 @@ exports.checkPaymentStatus = async (req, res) => {
   } catch (e) {
     console.error('checkPaymentStatus error:', e);
     res.status(500).json({ success: false, message: e.message || 'Server error' });
+  }
+};
+
+exports.cleanupFailedGCashBooking = async (req, res) => {
+  const bookingId = Number(req.params.bookingId);
+  const customerId = Number(req.body.customer_id);
+  if (!Number.isInteger(bookingId) || bookingId <= 0 || !Number.isInteger(customerId) || customerId <= 0) {
+    return res.status(400).json({ success: false, message: 'Valid booking_id and customer_id are required' });
+  }
+
+  try {
+    const [rows] = await db.query(
+      `SELECT p.payment_id, p.status AS payment_status, p.payment_method, p.paymongo_payment_id,
+              b.customer_id, b.booking_id
+       FROM booking b
+       LEFT JOIN payment p ON p.booking_id = b.booking_id
+       WHERE b.booking_id = ?
+       ORDER BY CASE
+         WHEN LOWER(COALESCE(p.status, '')) = 'paid' THEN 0
+         WHEN LOWER(COALESCE(p.status, '')) NOT IN ('failed', 'cancelled') THEN 1
+         ELSE 2
+       END, p.payment_id DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+    if (!rows.length) {
+      return res.json({ success: true, status: 'not_found', deleted: false });
+    }
+    const payment = rows[0];
+    if (Number(payment.customer_id) !== customerId) {
+      return res.status(403).json({ success: false, message: 'You are not authorized to update this booking' });
+    }
+    if (String(payment.payment_method || '').toLowerCase() !== 'gcash') {
+      if (!payment.payment_id) {
+        const cleanup = await discardUnstartedGcashBooking(bookingId, customerId);
+        return res.json({ success: true, status: cleanup.deleted ? 'failed' : 'not_found', deleted: cleanup.deleted });
+      }
+      return res.status(409).json({ success: false, message: 'This is not a GCash booking' });
+    }
+    if (!payment.payment_id) {
+      const cleanup = await discardUnstartedGcashBooking(bookingId, customerId);
+      return res.json({ success: true, status: cleanup.deleted ? 'failed' : 'not_found', deleted: cleanup.deleted });
+    }
+    if (['paid', 'success', 'succeeded', 'completed'].includes(String(payment.payment_status || '').toLowerCase())) {
+      return res.json({ success: true, status: 'paid', deleted: false });
+    }
+    if (!payment.paymongo_payment_id) {
+      return res.status(409).json({
+        success: false,
+        message: 'PayMongo has not provided a payment reference yet. The draft booking was kept for safety.'
+      });
+    }
+
+    const providerResult = await paymongoService.checkPaymentStatus(payment.paymongo_payment_id);
+    if (!providerResult.success) {
+      return res.status(502).json({
+        success: false,
+        message: providerResult.error || 'Unable to verify payment status with PayMongo'
+      });
+    }
+    if (providerResult.status === 'succeeded') {
+      await db.query(
+        'UPDATE payment SET status = ?, paymongo_payment_id = ? WHERE payment_id = ?',
+        ['paid', providerResult.paymongoPaymentId || payment.paymongo_payment_id, payment.payment_id]
+      );
+      await activatePaidGcashBooking(bookingId, req.app.get('io'));
+      const [bookingRows] = await db.query(
+        `SELECT booking_type FROM booking WHERE booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      if (String(bookingRows[0]?.booking_type || '').toLowerCase().includes('pick')) {
+        await deliveryController.ensureDeliveryRecord({
+          booking_id: bookingId,
+          status: 'pending',
+          io: req.app.get('io')
+        });
+      }
+      return res.json({ success: true, status: 'paid', deleted: false });
+    }
+    if (providerResult.status !== 'canceled' && providerResult.status !== 'failed') {
+      return res.json({ success: true, status: 'processing', deleted: false });
+    }
+
+    await db.query(
+      `UPDATE payment SET status = ?
+       WHERE payment_id = ?
+         AND LOWER(COALESCE(status, '')) NOT IN ('paid', 'success', 'succeeded', 'completed')`,
+      ['failed', payment.payment_id]
+    );
+    const cleanup = await discardFailedGcashBooking(bookingId, customerId);
+    if (!cleanup.deleted && cleanup.reason === 'not_found') {
+      const [currentPaymentRows] = await db.query(
+        'SELECT status FROM payment WHERE payment_id = ? LIMIT 1',
+        [payment.payment_id]
+      );
+      if (String(currentPaymentRows[0]?.status || '').toLowerCase() === 'paid') {
+        return res.json({ success: true, status: 'paid', deleted: false });
+      }
+    }
+    return res.json({ success: true, status: 'failed', deleted: cleanup.deleted });
+  } catch (error) {
+    console.error('cleanupFailedGCashBooking error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to verify and clean up failed GCash booking' });
   }
 };
 
@@ -447,6 +559,7 @@ exports.syncCustomerRefundStatus = async (req, res) => {
            WHERE refund_id = ? AND LOWER(COALESCE(status, '')) = 'pending'`,
           [refund.refund_id]
         );
+        await discardFailedGcashBooking(bookingId, customerId);
         refund.payment_status = 'failed';
         refund.status = 'cancelled';
       }
@@ -539,7 +652,13 @@ exports.handlePayMongoWebhook = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Malformed PayMongo webhook payload' });
     }
 
-    if (eventType === 'payment.paid' || eventType === 'payment.failed' || eventType === 'checkout_session.payment.paid' || eventType === 'checkout_session.payment.failed') {
+    if (
+      eventType === 'payment.paid' ||
+      eventType === 'payment.failed' ||
+      eventType === 'checkout_session.payment.paid' ||
+      eventType === 'checkout_session.payment.failed' ||
+      eventType === 'checkout_session.expired'
+    ) {
       const providerStatus = ['payment.paid', 'checkout_session.payment.paid'].includes(eventType)
         ? 'paid'
         : 'failed';
@@ -561,11 +680,13 @@ exports.handlePayMongoWebhook = async (req, res) => {
       const [result] = await db.query(
         `UPDATE payment
          SET paymongo_payment_id = ?, status = ?
-         WHERE paymongo_payment_id IN (${referencePlaceholders})`,
+         WHERE paymongo_payment_id IN (${referencePlaceholders})
+           AND (? = 'paid' OR LOWER(COALESCE(status, '')) NOT IN ('paid', 'success', 'succeeded', 'completed'))`,
         [
           providerPaymentId || resourceId,
           providerStatus,
-          ...paymentReferenceIds
+          ...paymentReferenceIds,
+          providerStatus
         ]
       );
       console.log(`[PayMongo] Webhook ${eventType} payment=${providerPaymentId || resourceId} updated=${result.affectedRows}`);
@@ -578,8 +699,34 @@ exports.handlePayMongoWebhook = async (req, res) => {
              AND LOWER(COALESCE(r.status, '')) = 'pending'`,
           paymentReferenceIds
         );
+        const [failedBookings] = await db.query(
+          `SELECT DISTINCT b.booking_id
+           FROM payment p
+           INNER JOIN booking b ON b.booking_id = p.booking_id
+           WHERE p.paymongo_payment_id IN (${referencePlaceholders})
+             AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
+             AND LOWER(COALESCE(p.status, '')) = 'failed'`,
+          paymentReferenceIds
+        );
+        for (const booking of failedBookings) {
+          await discardFailedGcashBooking(booking.booking_id);
+        }
       }
       if (providerStatus === 'paid') {
+        const [paidDrafts] = await db.query(
+          `SELECT DISTINCT b.booking_id
+           FROM payment p
+           INNER JOIN booking b ON b.booking_id = p.booking_id
+           WHERE p.paymongo_payment_id = ?
+             AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
+             AND LOWER(COALESCE(p.status, '')) = 'paid'
+             AND LOWER(COALESCE(b.status, '')) = 'payment_pending'`,
+          [providerPaymentId || resourceId]
+        );
+        for (const booking of paidDrafts) {
+          await activatePaidGcashBooking(booking.booking_id, req.app.get('io'));
+        }
+
         const [pickupBookings] = await db.query(
           `SELECT b.booking_id
            FROM payment p
