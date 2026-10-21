@@ -391,7 +391,9 @@ exports.syncCustomerRefundStatus = async (req, res) => {
 
   try {
     const [rows] = await db.query(
-      `SELECT b.customer_id, r.refund_id, r.paymongo_refund_id, r.amount, r.status
+      `SELECT b.customer_id, b.status AS booking_status,
+              p.payment_id, p.paymongo_payment_id, p.status AS payment_status,
+              r.refund_id, r.paymongo_refund_id, r.amount, r.status
        FROM booking b
        LEFT JOIN payment p ON p.booking_id = b.booking_id
        LEFT JOIN refund r ON r.payment_id = p.payment_id
@@ -405,15 +407,81 @@ exports.syncCustomerRefundStatus = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You are not authorized to view this refund' });
     }
 
-    const refund = rows[0];
-    if (!refund.refund_id || !refund.paymongo_refund_id) {
+    let refund = rows[0];
+    if (!refund.refund_id) {
       return res.json({
         success: true,
-        refund: refund.refund_id ? {
+        refund: null
+      });
+    }
+
+    const refundStatus = String(refund.status || '').toLowerCase();
+    const paymentStatus = String(refund.payment_status || '').toLowerCase();
+    if (
+      refundStatus === 'pending' &&
+      ['pending', 'failed'].includes(paymentStatus) &&
+      refund.paymongo_payment_id
+    ) {
+      const paymentResult = await paymongoService.checkPaymentStatus(refund.paymongo_payment_id);
+      if (!paymentResult.success) {
+        return res.status(502).json({ success: false, message: paymentResult.error || 'Unable to verify payment status with PayMongo' });
+      }
+
+      if (paymentResult.status === 'succeeded') {
+        const resolvedPaymentId = paymentResult.paymongoPaymentId || refund.paymongo_payment_id;
+        await db.query(
+          `UPDATE payment
+           SET status = 'paid', paymongo_payment_id = ?
+           WHERE payment_id = ?`,
+          [resolvedPaymentId, refund.payment_id]
+        );
+        refund.payment_status = 'paid';
+        refund.paymongo_payment_id = resolvedPaymentId;
+      } else if (paymentResult.status === 'canceled' || paymentResult.status === 'failed') {
+        await db.query(
+          `UPDATE payment SET status = 'failed' WHERE payment_id = ?`,
+          [refund.payment_id]
+        );
+        await db.query(
+          `UPDATE refund SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+           WHERE refund_id = ? AND LOWER(COALESCE(status, '')) = 'pending'`,
+          [refund.refund_id]
+        );
+        refund.payment_status = 'failed';
+        refund.status = 'cancelled';
+      }
+    }
+
+    if (
+      refund.status === 'pending' &&
+      refund.payment_status === 'paid' &&
+      String(refund.booking_status || '').toLowerCase() === 'cancelled'
+    ) {
+      const refundResult = await processBookingRefund({
+        bookingId,
+        reason: 'requested_by_customer',
+        notes: 'Automatic refund for cancelled booking',
+        requireCancelled: true,
+        processWithPayMongo: true
+      });
+      if (!refundResult.success) {
+        return res.status(refundResult.code || 502).json({
+          success: false,
+          message: refundResult.message || 'Unable to submit refund to PayMongo',
+          refund: refundResult.refund || null
+        });
+      }
+      refund = { ...refund, ...refundResult.refund };
+    }
+
+    if (!refund.paymongo_refund_id) {
+      return res.json({
+        success: true,
+        refund: {
           refund_id: refund.refund_id,
           amount: Number(refund.amount),
           status: refund.status
-        } : null
+        }
       });
     }
 

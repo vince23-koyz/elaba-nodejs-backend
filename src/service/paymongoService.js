@@ -330,7 +330,7 @@ class PayMongoService {
           const sessionPaymentStatus = sessionPayment?.attributes?.status;
           let status = 'processing';
           if (attrs.status === 'paid' || sessionPaymentStatus === 'paid') status = 'succeeded';
-          else if (attrs.status === 'expired' || attrs.status === 'cancelled' || attrs.status === 'canceled') status = 'canceled';
+          else if (['expired', 'failed', 'cancelled', 'canceled'].includes(String(attrs.status || '').toLowerCase())) status = 'canceled';
           const piStatus = attrs.payment_intent?.attributes?.status || attrs.payment_intent_status;
           if (piStatus === 'succeeded') status = 'succeeded';
           else if (piStatus === 'canceled' || piStatus === 'cancelled') status = 'canceled';
@@ -343,9 +343,11 @@ class PayMongoService {
           console.log(`[PayMongo] Checkout session ${paymentIntentId}: status=${status} payment=${paymongoPaymentId || 'null'}`);
           return { success: true, status, paymongoPaymentId, data: session };
         } catch (err) {
-          console.warn('[PayMongo] Failed to fetch checkout session from API, falling back to local status:', err.response?.data || err.message);
-          const status = this._checkoutSessionsStatus.get(paymentIntentId) || 'processing';
-          return { success: true, status, data: { id: paymentIntentId, type: 'checkout_session' } };
+          console.error('[PayMongo] Failed to fetch checkout session from API:', err.response?.data || err.message);
+          return {
+            success: false,
+            error: err.response?.data?.errors?.[0]?.detail || 'Failed to check checkout session status'
+          };
         }
       } else {
         try {
