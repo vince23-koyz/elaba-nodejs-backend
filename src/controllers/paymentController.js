@@ -2,6 +2,7 @@
 const db = require("../config/db");
 const crypto = require('crypto');
 const { sendNotification } = require('../service/notificationService');
+const deliveryController = require('./deliveryController');
 
 // Get all payments
 exports.getPayments = async (req, res) => {
@@ -102,7 +103,13 @@ exports.updatePaymentStatus = async (req, res) => {
     const sql = "UPDATE payment SET status = ? WHERE payment_id = ?";
     const [result] = await db.query(sql, [nextStatus, id]);
 
-    if (result.affectedRows === 0) return res.status(404).json({ message: "Payment not found" });
+    if (result.affectedRows === 0) {
+      const [existingPayment] = await db.query(
+        'SELECT payment_id FROM payment WHERE payment_id = ? LIMIT 1',
+        [id]
+      );
+      if (!existingPayment.length) return res.status(404).json({ message: "Payment not found" });
+    }
 
     let paymentRow = null;
 
@@ -283,10 +290,52 @@ exports.createGCashPayment = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Amount, description and customerInfo required' });
   }
   try {
+    if (bookingId) {
+      const [bookings] = await db.query(
+        `SELECT booking_id, customer_id, shop_id, service_id, total_amount
+         FROM booking
+         WHERE booking_id = ?
+         LIMIT 1`,
+        [bookingId]
+      );
+      if (!bookings.length) {
+        return res.status(404).json({ success: false, message: 'Booking not found for this payment' });
+      }
+      if (Math.abs(Number(bookings[0].total_amount) - Number(amount)) > 0.01) {
+        return res.status(409).json({ success: false, message: 'Payment amount does not match the booking total' });
+      }
+    }
+
     const result = await paymongoService.createGCashPayment(amount, description, customerInfo, bookingId);
     if (!result.success) {
       return res.status(400).json({ success: false, message: result.error || 'Payment creation failed' });
     }
+
+    if (bookingId) {
+      const booking = (await db.query(
+        `SELECT customer_id, shop_id, service_id, total_amount
+         FROM booking
+         WHERE booking_id = ?
+         LIMIT 1`,
+        [bookingId]
+      ))[0][0];
+      const paymentReference = result.data.paymongoPaymentId || result.data.paymentIntentId;
+      const [paymentResult] = await db.query(
+        `INSERT INTO payment
+          (booking_id, customer_id, shop_id, service_id, payment_method, amount, status, date, paymongo_payment_id)
+         VALUES (?, ?, ?, ?, 'gcash', ?, 'pending', NOW(), ?)`,
+        [
+          bookingId,
+          booking.customer_id,
+          booking.shop_id,
+          booking.service_id,
+          Number(booking.total_amount),
+          paymentReference
+        ]
+      );
+      result.data.paymentRecordId = paymentResult.insertId;
+    }
+
     res.json({ success: true, data: result.data, mode: paymongoService.mode, message: 'GCash payment created' });
   } catch (e) {
     console.error('createGCashPayment error:', e);
@@ -422,28 +471,74 @@ exports.handlePayMongoWebhook = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Malformed PayMongo webhook payload' });
     }
 
-    if (eventType === 'payment.paid' || eventType === 'payment.failed' || eventType === 'checkout_session.payment.paid') {
+    if (eventType === 'payment.paid' || eventType === 'payment.failed' || eventType === 'checkout_session.payment.paid' || eventType === 'checkout_session.payment.failed') {
       const providerStatus = ['payment.paid', 'checkout_session.payment.paid'].includes(eventType)
         ? 'paid'
-        : 'pending';
-      const nestedPayment = resource?.attributes?.payments?.[0];
+        : 'failed';
+      const attributes = resource?.attributes || {};
+      const payments = attributes.payments;
+      const nestedPayment = Array.isArray(payments) ? payments[0] : payments;
       const providerPaymentId = resource?.type === 'payment' ? resourceId : nestedPayment?.id;
-      if (!providerPaymentId) {
+      const paymentReferenceIds = [...new Set([
+        providerPaymentId,
+        attributes.payment_intent_id,
+        typeof attributes.payment_intent === 'string' ? attributes.payment_intent : attributes.payment_intent?.id,
+        attributes.checkout_session_id,
+        resourceId
+      ].filter(Boolean))];
+      if (!paymentReferenceIds.length) {
         return res.status(400).json({ success: false, message: 'Webhook has no PayMongo payment ID' });
       }
+      const referencePlaceholders = paymentReferenceIds.map(() => '?').join(', ');
       const [result] = await db.query(
         `UPDATE payment
          SET paymongo_payment_id = ?, status = ?
-         WHERE paymongo_payment_id IN (?, ?, ?)
-         `,
+         WHERE paymongo_payment_id IN (${referencePlaceholders})`,
         [
-          providerPaymentId,
-          providerPaymentId,
-          resource?.attributes?.payment_intent_id || resource?.attributes?.payment_intent?.id || resourceId
+          providerPaymentId || resourceId,
+          providerStatus,
+          ...paymentReferenceIds
         ]
       );
-      console.log(`[PayMongo] Webhook ${eventType} payment=${providerPaymentId} updated=${result.affectedRows}`);
+      console.log(`[PayMongo] Webhook ${eventType} payment=${providerPaymentId || resourceId} updated=${result.affectedRows}`);
+      if (providerStatus === 'failed') {
+        await db.query(
+          `UPDATE refund r
+           INNER JOIN payment p ON p.payment_id = r.payment_id
+           SET r.status = 'cancelled', r.updated_at = CURRENT_TIMESTAMP
+           WHERE p.paymongo_payment_id IN (${referencePlaceholders})
+             AND LOWER(COALESCE(r.status, '')) = 'pending'`,
+          paymentReferenceIds
+        );
+      }
       if (providerStatus === 'paid') {
+        const [pickupBookings] = await db.query(
+          `SELECT b.booking_id
+           FROM payment p
+           INNER JOIN booking b ON b.booking_id = p.booking_id
+           WHERE p.paymongo_payment_id = ?
+             AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
+             AND LOWER(COALESCE(p.status, '')) = 'paid'
+             AND LOWER(COALESCE(b.booking_type, '')) IN ('pick up', 'pickup')
+             AND LOWER(COALESCE(b.status, '')) <> 'cancelled'`,
+          [providerPaymentId || resourceId]
+        );
+        for (const booking of pickupBookings) {
+          try {
+            await deliveryController.ensureDeliveryRecord({
+              booking_id: booking.booking_id,
+              status: 'pending',
+              io: req.app.get('io')
+            });
+          } catch (deliveryError) {
+            console.error(`[PayMongo] Failed to finalize paid pickup booking ${booking.booking_id}:`, deliveryError);
+            return res.status(500).json({
+              success: false,
+              message: 'Payment was recorded, but pickup booking finalization needs to retry'
+            });
+          }
+        }
+
         const [cancelledBookings] = await db.query(
           `SELECT b.booking_id, b.customer_id
            FROM payment p
@@ -452,7 +547,7 @@ exports.handlePayMongoWebhook = async (req, res) => {
              AND LOWER(COALESCE(p.payment_method, '')) = 'gcash'
              AND LOWER(COALESCE(p.status, '')) = 'paid'
              AND LOWER(COALESCE(b.status, '')) = 'cancelled'`,
-          [providerPaymentId]
+          [providerPaymentId || resourceId]
         );
         for (const booking of cancelledBookings) {
           try {

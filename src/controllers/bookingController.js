@@ -67,7 +67,7 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
 
     const isGCash = String(payment.payment_method || '').toLowerCase() === 'gcash';
     const isPaid = ['paid', 'success', 'succeeded', 'completed'].includes(String(payment.payment_status || '').toLowerCase());
-    if (!isGCash || !isPaid) {
+    if (!isGCash) {
       await connection.commit();
       return { success: true, refund: null };
     }
@@ -86,6 +86,47 @@ async function processCustomerBookingRefund({ bookingId, customerId, reason = nu
       LIMIT 1
       FOR UPDATE
     `, [payment.payment_id, bookingId]);
+
+    if (!isPaid) {
+      if (existing.length) {
+        await connection.commit();
+        return { success: true, refund: existing[0], duplicate: true };
+      }
+      if (!processWithPayMongo || !requireCancelled) {
+        await connection.commit();
+        return { success: true, refund: null };
+      }
+      if (!payment.paymongo_payment_id) {
+        await connection.commit();
+        return {
+          success: false,
+          code: 409,
+          message: 'The pending GCash payment has no PayMongo reference, so the refund could not be queued. Contact support if you were charged.',
+          refund: null
+        };
+      }
+
+      const [insertResult] = await connection.query(`
+        INSERT INTO refund (payment_id, booking_id, amount, reason, notes, status)
+        VALUES (?, ?, ?, ?, ?, 'pending')
+      `, [payment.payment_id, bookingId, amount, reason, notes || null]);
+      refundId = insertResult.insertId;
+      await connection.commit();
+      return {
+        success: true,
+        code: 202,
+        message: 'Refund request queued until PayMongo confirms the payment.',
+        refund: {
+          refund_id: refundId,
+          paymongo_refund_id: null,
+          amount,
+          reason,
+          notes: notes || null,
+          status: 'pending'
+        }
+      };
+    }
+
     if (existing.length) {
       const existingRefund = existing[0];
       const existingStatus = String(existingRefund.status || '').toLowerCase();
@@ -178,7 +219,10 @@ exports.processBookingRefund = processCustomerBookingRefund;
 
 // CREATE Booking
 exports.createBooking = async (req, res) => {
-  const { booking_type, booking_date, pickup_date, status, total_amount, shop_id, service_id, customer_id } = req.body;
+  const {
+    booking_type, booking_date, pickup_date, status, total_amount, shop_id, service_id,
+    customer_id, estimated_weight_kg,
+  } = req.body;
 
   // Debug log
   console.log('Create Booking:', req.body);
@@ -223,18 +267,65 @@ exports.createBooking = async (req, res) => {
       return res.status(409).json({ message: 'This shop is currently closed and cannot accept bookings.' });
     }
 
+    const [serviceRows] = await db.query(
+      'SELECT price, max_kg, price_tiers FROM services WHERE service_id = ? AND shop_id = ? LIMIT 1',
+      [service_id, shop_id],
+    );
+    if (!serviceRows.length) {
+      return res.status(404).json({ message: 'Service not found for this shop.' });
+    }
+
+    let selectedWeight = null;
+    if (estimated_weight_kg !== undefined && estimated_weight_kg !== null) {
+      selectedWeight = Number(estimated_weight_kg);
+      const serviceMaxKg = Number(serviceRows[0].max_kg) || 9;
+      if (!Number.isInteger(selectedWeight) || selectedWeight < 1 || selectedWeight > serviceMaxKg) {
+        return res.status(400).json({ message: `Estimated weight must be between 1 and ${serviceMaxKg} kg for this service.` });
+      }
+    }
+
+    let priceTiers = serviceRows[0].price_tiers;
+    if (typeof priceTiers === 'string') {
+      try {
+        priceTiers = JSON.parse(priceTiers);
+      } catch (error) {
+        console.error('Invalid stored service price tiers:', error);
+        return res.status(500).json({ message: 'Service pricing is not configured correctly.' });
+      }
+    }
+    if (Array.isArray(priceTiers) && priceTiers.length > 0) {
+      if (selectedWeight === null) {
+        return res.status(400).json({ message: 'estimated_weight_kg is required for this service.' });
+      }
+      const matchingTier = priceTiers.find(tier => selectedWeight <= Number(tier.max_kg));
+      if (!matchingTier) {
+        return res.status(400).json({ message: 'No price is configured for the selected weight.' });
+      }
+      const pickupFee = isPickupBooking ? 40 : 0;
+      const expectedTotal = Number(matchingTier.price) + pickupFee;
+      if (!Number.isFinite(Number(total_amount)) || !Number.isFinite(expectedTotal)) {
+        return res.status(400).json({ message: 'A valid total_amount is required.' });
+      }
+      if (Math.abs(Number(total_amount) - expectedTotal) > 0.01) {
+        return res.status(409).json({
+          message: 'The service price has changed. Please review the updated price and try again.',
+          expected_total: expectedTotal,
+        });
+      }
+    }
+
     let sql, params;
 
     if (isPickupBooking) {
       // Pickup bookings have no walk-in booking date.
-      sql = `INSERT INTO booking (booking_type, booking_date, pickup_date, status, total_amount, shop_id, service_id, customer_id) 
-                 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`;
-      params = [booking_type, pickup_date, status, total_amount, shop_id, service_id, customer_id];
+      sql = `INSERT INTO booking (booking_type, booking_date, pickup_date, status, total_amount, shop_id, service_id, customer_id, estimated_weight_kg)
+                 VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)`;
+      params = [booking_type, pickup_date, status, total_amount, shop_id, service_id, customer_id, selectedWeight];
     } else {
       // For walk-in: only populate booking_date, NOT pickup_date
-      sql = `INSERT INTO booking (booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`;
-      params = [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id];
+      sql = `INSERT INTO booking (booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id, estimated_weight_kg)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+      params = [booking_type, booking_date, status, total_amount, shop_id, service_id, customer_id, selectedWeight];
     }
 
     const [result] = await db.query(sql, params);
@@ -342,7 +433,7 @@ exports.getBookings = async (req, res) => {
          WHEN b.booking_type LIKE '%pick up%' COLLATE utf8mb4_general_ci THEN b.pickup_date
          ELSE b.booking_date
        END AS service_date,
-      b.booking_date, b.pickup_date, b.created_at, b.status AS booking_status, b.total_amount, 
+      b.booking_date, b.pickup_date, b.created_at, b.status AS booking_status, b.total_amount, b.estimated_weight_kg,
        b.shop_id, b.customer_id, s.name AS shop_name, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
         p.payment_id, p.payment_method, p.amount AS payment_amount, p.status AS payment_status, p.date,
        EXISTS (
@@ -402,7 +493,7 @@ exports.getBookingById = async (req, res) => {
                           WHEN b.booking_type LIKE '%pick up%' COLLATE utf8mb4_general_ci THEN b.pickup_date
                           ELSE b.booking_date
                         END AS service_date,
-                        b.booking_date, b.pickup_date, b.created_at, b.status AS booking_status, b.total_amount, 
+                        b.booking_date, b.pickup_date, b.created_at, b.status AS booking_status, b.total_amount, b.estimated_weight_kg,
                         b.service_id, b.customer_id, srv.offers AS service_name, srv.description AS service_description,
                         s.name AS shop_name, c.first_name AS customer_first_name, c.last_name AS customer_last_name,
                         p.payment_id, p.payment_method, p.status AS payment_status, p.date,
@@ -439,16 +530,18 @@ exports.updateBookingStatus = async (req, res) => {
   try {
     let refundResult = null;
     let refundError = null;
+    const [currentBookingRows] = await db.query(
+      'SELECT customer_id, status FROM booking WHERE booking_id = ? LIMIT 1',
+      [id]
+    );
+    if (!currentBookingRows.length) return res.status(404).json({ message: 'Booking not found' });
+    const previousBookingStatus = String(currentBookingRows[0].status || '').toLowerCase();
+
     if (String(status).toLowerCase() === 'cancelled' && requestedCustomerId != null) {
-      const [bookingRows] = await db.query(
-        'SELECT customer_id, status FROM booking WHERE booking_id = ? LIMIT 1',
-        [id]
-      );
-      if (!bookingRows.length) return res.status(404).json({ message: 'Booking not found' });
-      if (Number(bookingRows[0].customer_id) !== Number(requestedCustomerId)) {
+      if (Number(currentBookingRows[0].customer_id) !== Number(requestedCustomerId)) {
         return res.status(403).json({ message: 'You are not authorized to cancel this booking' });
       }
-      if (String(bookingRows[0].status || '').toLowerCase() !== 'pending') {
+      if (previousBookingStatus !== 'pending') {
         return res.status(400).json({ message: 'Customers can only cancel pending bookings' });
       }
     }

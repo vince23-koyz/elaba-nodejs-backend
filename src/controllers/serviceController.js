@@ -1,19 +1,71 @@
 // eLaba-backend/src/controllers/serviceController.js
 const db = require('../config/db');
 
+const validateWeightPricing = (maxKg, priceTiers) => {
+  const normalizedMaxKg = Number(maxKg);
+  if (!Number.isInteger(normalizedMaxKg) || normalizedMaxKg < 1 || normalizedMaxKg > 9) {
+    return { error: 'max_kg must be a whole number from 1 to 9.' };
+  }
+
+  let tiers = priceTiers;
+  if (typeof tiers === 'string') {
+    try {
+      tiers = JSON.parse(tiers);
+    } catch {
+      return { error: 'price_tiers must be a valid array.' };
+    }
+  }
+
+  if (!Array.isArray(tiers) || tiers.length === 0) {
+    return { error: 'At least one price tier is required.' };
+  }
+
+  let previousMax = 0;
+  const normalizedTiers = [];
+  for (const tier of tiers) {
+    const tierMax = Number(tier?.max_kg);
+    const tierPrice = Number(tier?.price);
+    if (!Number.isInteger(tierMax) || tierMax <= previousMax || tierMax > normalizedMaxKg) {
+      return { error: 'Price tier kg limits must increase and stay within max_kg.' };
+    }
+    if (!Number.isFinite(tierPrice) || tierPrice <= 0) {
+      return { error: 'Every price tier must have a price greater than zero.' };
+    }
+    normalizedTiers.push({ max_kg: tierMax, price: tierPrice });
+    previousMax = tierMax;
+  }
+
+  if (previousMax !== normalizedMaxKg) {
+    return { error: 'The final price tier kg limit must match max_kg.' };
+  }
+
+  return { maxKg: normalizedMaxKg, tiers: normalizedTiers };
+};
+
 // CREATE Service
 exports.createService = async (req, res) => {
   console.log("REQ.BODY:", req.body);
 
-  const { offers, quantity, description, price, package, shop_id, status } = req.body;
+  const { offers, quantity, description, price, package: packageName, shop_id, status, max_kg, price_tiers } = req.body;
 
   if (!shop_id) {
     return res.status(400).json({ message: "Shop ID is required" });
   }
 
+  const weightPricing = validateWeightPricing(max_kg, price_tiers);
+  if (weightPricing.error) {
+    return res.status(400).json({ message: weightPricing.error });
+  }
+
   try {
-    const sql = "INSERT INTO services (offers, quantity, description, price, package, shop_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)";
-    const [result] = await db.query(sql, [offers, quantity, description, price, package, shop_id, status]);
+    const startingPrice = weightPricing.tiers[0].price;
+    const sql = `INSERT INTO services
+      (offers, quantity, description, price, package, shop_id, status, max_kg, price_tiers)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const [result] = await db.query(sql, [
+      offers, quantity, description, startingPrice, packageName, shop_id, status,
+      weightPricing.maxKg, JSON.stringify(weightPricing.tiers),
+    ]);
 
     res.status(201).json({ 
       success: true,
@@ -79,14 +131,22 @@ exports.getServicesByShop = async (req, res) => {
 // UPDATE Service
 exports.updateService = async (req, res) => {
   const { id } = req.params;
-  const { offers, quantity, description, price, package, status } = req.body;
+  const { offers, quantity, description, package: packageName, status, max_kg, price_tiers } = req.body;
+
+  const weightPricing = validateWeightPricing(max_kg, price_tiers);
+  if (weightPricing.error) {
+    return res.status(400).json({ message: weightPricing.error });
+  }
 
   try {
     const sql = `UPDATE services 
-                SET offers=?, quantity=?, description=?, price=?, package=?, status=? 
+                SET offers=?, quantity=?, description=?, price=?, package=?, status=?, max_kg=?, price_tiers=?
                 WHERE service_id=?`;
 
-    const [result] = await db.query(sql, [offers, quantity, description, price, package, status, id]);
+    const [result] = await db.query(sql, [
+      offers, quantity, description, weightPricing.tiers[0].price, packageName, status,
+      weightPricing.maxKg, JSON.stringify(weightPricing.tiers), id,
+    ]);
     
     if (result.affectedRows === 0) return res.status(404).json({ message: 'Service not found' });
     res.json({ message: 'Service updated successfully' });

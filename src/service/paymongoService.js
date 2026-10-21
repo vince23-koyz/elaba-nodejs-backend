@@ -108,8 +108,11 @@ class PayMongoService {
           ],
           description: description || 'eLaba GCash Payment',
           send_email_receipt: false,
-          customer_email: customerInfo?.email || undefined,
-          customer_name: customerInfo?.name || undefined,
+          billing: {
+            name: customerInfo?.name || undefined,
+            email: customerInfo?.email || undefined,
+            phone: customerInfo?.phone || undefined
+          },
           // Use uppercase, simple descriptor to satisfy provider rules
           statement_descriptor: 'ELABA',
           success_url: successUrl,

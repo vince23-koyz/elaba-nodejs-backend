@@ -557,6 +557,14 @@ exports.updateShop = async (req, res) => {
           at: new Date().toISOString(),
         });
 
+        if (typeof status !== 'undefined' || shouldResetToPending) {
+          io.emit('publicShopStatusUpdated', {
+            shopId: Number(id),
+            status: shouldResetToPending ? 'pending' : status,
+            at: new Date().toISOString(),
+          });
+        }
+
         if ((typeof status !== 'undefined' || shouldResetToPending) && existingShop.admin_id) {
           io.to(`user_admin_${existingShop.admin_id}`).emit('shopStatusUpdated', {
             shopId: Number(id),

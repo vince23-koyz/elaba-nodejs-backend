@@ -1,0 +1,6 @@
+ALTER TABLE services
+  ADD COLUMN max_kg TINYINT UNSIGNED NULL,
+  ADD COLUMN price_tiers JSON NULL;
+
+ALTER TABLE booking
+  ADD COLUMN estimated_weight_kg TINYINT UNSIGNED NULL;

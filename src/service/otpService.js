@@ -48,6 +48,8 @@ const sendSms = async (phoneNumber, message) => {
 };
 
 const OtpService = {
+  sendSms,
+
   // 📨 Send OTP
   sendOtp: async (phoneNumber) => {
     const otpCode = crypto.randomInt(100000, 999999).toString();
