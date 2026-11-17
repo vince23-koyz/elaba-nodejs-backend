@@ -1,0 +1,2 @@
+ALTER TABLE booking
+  ADD COLUMN quote_status VARCHAR(32) NULL DEFAULT NULL;

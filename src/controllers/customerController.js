@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const { createTokenPair, createAccessToken, verifyRefreshToken } = require('../utils/authTokenService');
 
 const db = require('../config/db'); // Use the shared db connection
 const { normalizePhoneNumber } = require('../utils/phoneUtils');
@@ -302,10 +303,24 @@ exports.loginCustomer = async (req, res) => {
 
     resetFailedLoginAttempt(normalizedPhone);
 
+    let tokens;
+    try {
+      tokens = createTokenPair('customer', customer.customer_id);
+    } catch {
+      console.error('JWT_SECRET is missing or too short; cannot issue customer access token');
+      return res.status(503).json({
+        success: false,
+        code: 'AUTH_UNAVAILABLE',
+        message: 'Login is temporarily unavailable. Please try again later.',
+      });
+    }
+
     // Login successful – return first_name too
     res.json({ 
       success: true, 
       message: 'Login successful!', 
+      token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
       customer: { 
         customer_id: customer.customer_id,
         first_name: customer.first_name,
@@ -317,6 +332,46 @@ exports.loginCustomer = async (req, res) => {
   } catch (err) {
     console.error("DB Error (loginCustomer):", err);
     res.status(500).json({ success: false, message: 'Database error', error: err.message });
+  }
+};
+
+exports.refreshCustomerToken = async (req, res) => {
+  const { refresh_token: refreshToken } = req.body || {};
+  if (typeof refreshToken !== 'string' || !refreshToken) {
+    return res.status(400).json({ success: false, message: 'A refresh token is required.' });
+  }
+
+  let customerId;
+  try {
+    customerId = verifyRefreshToken('customer', refreshToken);
+  } catch {
+    return res.status(401).json({ success: false, message: 'Customer session expired. Please sign in again.' });
+  }
+
+  try {
+    const [customers] = await db.query(
+      'SELECT customer_id FROM customer WHERE customer_id = ? LIMIT 1',
+      [customerId],
+    );
+    if (!customers.length) {
+      return res.status(401).json({ success: false, message: 'Customer session is no longer valid. Please sign in again.' });
+    }
+
+    let accessToken;
+    try {
+      accessToken = createAccessToken('customer', customerId);
+    } catch {
+      console.error('JWT_SECRET is missing or too short; cannot refresh customer access token');
+      return res.status(503).json({
+        success: false,
+        code: 'AUTH_UNAVAILABLE',
+        message: 'Authentication is temporarily unavailable. Please try again later.',
+      });
+    }
+    return res.json({ success: true, token: accessToken });
+  } catch (error) {
+    console.error('Customer access-token refresh database error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to refresh customer session.' });
   }
 };
 

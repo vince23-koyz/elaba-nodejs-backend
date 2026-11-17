@@ -1,6 +1,8 @@
 // routes/bookingRoutes.js
 const express = require('express');
 const bookingController = require('../controllers/bookingController');
+const requireCustomerAuth = require('../middleware/requireCustomerAuth');
+const requireAdminAuth = require('../middleware/requireAdminAuth');
 
 const router = express.Router();
 
@@ -12,16 +14,24 @@ const ensureFn = (fn, name) => {
   return fn;
 };
 
-router.post('/', ensureFn(bookingController.createBooking, 'createBooking'));       // POST /api/bookings
+router.post('/', (req, res, next) => {
+  if (req.body?.request_mode === 'laundry_request') {
+    return requireCustomerAuth(req, res, next);
+  }
+  return next();
+}, ensureFn(bookingController.createBooking, 'createBooking'));       // POST /api/bookings
 router.get('/', ensureFn(bookingController.getBookings, 'getBookings'));            // GET /api/bookings
-router.get('/reschedules', ensureFn(bookingController.getRescheduleRequests, 'getRescheduleRequests'));
-router.patch('/reschedules/:id/approve', ensureFn(bookingController.approveReschedule, 'approveReschedule'));
-router.patch('/reschedules/:id/reject', ensureFn(bookingController.rejectReschedule, 'rejectReschedule'));
 router.get('/:id', ensureFn(bookingController.getBookingById, 'getBookingById'));  // GET /api/bookings/:id
-router.get('/:id/reschedule', ensureFn(bookingController.getRescheduleRequest, 'getRescheduleRequest'));
-router.post('/:id/reschedule', ensureFn(bookingController.createRescheduleRequest, 'createRescheduleRequest'));
-router.put('/:id', ensureFn(bookingController.updateBooking, 'updateBooking'));     // PUT /api/bookings/:id
-router.patch('/:id/status', ensureFn(bookingController.updateBookingStatus, 'updateBookingStatus')); // PATCH /api/bookings/:id/status
+router.patch('/:id/confirm-pickup', requireAdminAuth, ensureFn(bookingController.confirmPickupRequest, 'confirmPickupRequest'));
+router.patch('/:id/price-confirmation', requireAdminAuth, ensureFn(bookingController.submitBookingPriceConfirmation, 'submitBookingPriceConfirmation'));
+router.patch('/:id/payment-method', requireCustomerAuth, ensureFn(bookingController.selectLaundryRequestPaymentMethod, 'selectLaundryRequestPaymentMethod'));
+router.put('/:id', requireAdminAuth, ensureFn(bookingController.updateBooking, 'updateBooking'));     // PUT /api/bookings/:id
+router.patch('/:id/status', (req, res, next) => {
+  if (String(req.body?.status || '').toLowerCase() === 'completed') {
+    return requireAdminAuth(req, res, next);
+  }
+  return next();
+}, ensureFn(bookingController.updateBookingStatus, 'updateBookingStatus')); // PATCH /api/bookings/:id/status
 router.delete('/:id', ensureFn(bookingController.deleteBooking, 'deleteBooking'));  // DELETE /api/bookings/:id
 
 module.exports = router;

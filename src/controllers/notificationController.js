@@ -86,14 +86,7 @@ exports.getNotifications = async (req, res) => {
          AND NOT (
            n.account_type = 'customer'
            AND LOWER(TRIM(n.title)) = 'booking declined'
-           AND (
-             LOWER(COALESCE(b.status, '')) = 'cancelled'
-             OR EXISTS (
-               SELECT 1
-               FROM booking_reschedule br
-               WHERE br.booking_id = n.booking_id
-             )
-           )
+           AND LOWER(COALESCE(b.status, '')) = 'cancelled'
          )`;
 
     const params = [accountId, accountType];

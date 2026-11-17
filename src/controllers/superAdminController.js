@@ -488,7 +488,7 @@ exports.getDashboardStats = async (req, res) => {
     
     // Get today's bookings
     const today = new Date().toISOString().split('T')[0];
-    const [todayCount] = await db.query('SELECT COUNT(*) as count FROM booking WHERE DATE(booking_date) = ?', [today]);
+    const [todayCount] = await db.query('SELECT COUNT(*) as count FROM booking WHERE DATE(created_at) = ?', [today]);
     
     // Get total revenue - skip if no price column exists
     let totalRevenue = 0;

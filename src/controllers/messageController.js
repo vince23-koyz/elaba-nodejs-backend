@@ -39,7 +39,7 @@ const getConversation = async (req, res) => {
         messages.message_id, messages.sender_type, messages.sender_id,
         messages.receiver_type, messages.receiver_id, messages.shop_id,
         messages.message_text, messages.is_read, messages.created_at,
-        messages.is_unsent, messages.unsent_at,
+        messages.is_unsent, messages.unsent_at, messages.edited_at,
         messages.reply_to_message_id,
         CASE WHEN replied.is_unsent = 1 THEN NULL ELSE replied.message_text END AS reply_to_message_text
       FROM messages 
@@ -71,7 +71,7 @@ const getMessagesByShop = async (req, res) => {
         messages.message_id, messages.sender_type, messages.sender_id,
         messages.receiver_type, messages.receiver_id, messages.shop_id,
         messages.message_text, messages.is_read, messages.created_at,
-        messages.is_unsent, messages.unsent_at,
+        messages.is_unsent, messages.unsent_at, messages.edited_at,
         messages.reply_to_message_id,
         CASE WHEN replied.is_unsent = 1 THEN NULL ELSE replied.message_text END AS reply_to_message_text
       FROM messages 
@@ -233,11 +233,71 @@ const unsendMessage = async (req, res) => {
   }
 };
 
+const editMessage = async (req, res) => {
+  const { messageId } = req.params;
+  const { sender_id, sender_type, message_text } = req.body;
+
+  if (
+    !Number.isInteger(Number(messageId)) ||
+    Number(messageId) < 1 ||
+    !Number.isInteger(Number(sender_id)) ||
+    Number(sender_id) < 1 ||
+    !['customer', 'admin'].includes(sender_type)
+  ) {
+    return res.status(400).json({ error: "messageId, sender_id, and a valid sender_type are required" });
+  }
+
+  if (typeof message_text !== 'string' || !message_text.trim()) {
+    return res.status(400).json({ error: "message_text must not be empty" });
+  }
+
+  try {
+    const [result] = await db.query(
+      `UPDATE messages
+       SET message_text = ?, edited_at = NOW()
+       WHERE message_id = ? AND sender_id = ? AND sender_type = ? AND is_unsent = 0`,
+      [message_text.trim(), messageId, sender_id, sender_type]
+    );
+
+    const [rows] = await db.query(
+      `SELECT message_id, message_text, edited_at, sender_type, sender_id,
+              receiver_type, receiver_id, shop_id, is_unsent
+       FROM messages
+       WHERE message_id = ? AND sender_id = ? AND sender_type = ?`,
+      [messageId, sender_id, sender_type]
+    );
+    const message = rows[0];
+    if (!message || message.is_unsent || (result.affectedRows === 0 && message.message_text !== message_text.trim())) {
+      return res.status(404).json({ error: "Message not found or cannot be edited" });
+    }
+
+    const io = req.app.get('io');
+
+    if (io) {
+      const senderRoom = `user_${message.sender_type}_${message.sender_id}`;
+      const receiverRoom = `user_${message.receiver_type}_${message.receiver_id}`;
+      const customerId = message.sender_type === 'customer' ? message.sender_id : message.receiver_id;
+      const adminId = message.sender_type === 'admin' ? message.sender_id : message.receiver_id;
+      const conversationId = `shop_${message.shop_id}_customer_${customerId}_admin_${adminId}`;
+
+      io.to(senderRoom).emit('messageEdited', message);
+      io.to(receiverRoom).emit('messageEdited', message);
+      io.to(conversationId).emit('messageEdited', message);
+    }
+
+    res.json({ message });
+  } catch (err) {
+    console.error("Error editing message:", err);
+    res.status(500).json({ error: "Database error" });
+  }
+};
+
 module.exports = {
   createMessage,
   getConversation,
   getMessagesByShop,
   getConversations,
   markMessagesAsRead,
-  unsendMessage
+  unsendMessage,
+  editMessage
 };

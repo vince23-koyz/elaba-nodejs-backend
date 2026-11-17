@@ -22,6 +22,7 @@ const adminLoginLimiter = rateLimit({
 router.post('/register', adminController.registerAdmin);  // POST /api/admin/register
 router.post('/check-phone', adminController.checkPhone);  // POST /api/admin/check-phone (secure phone verification)
 router.post('/login', adminLoginLimiter, adminController.loginAdmin);        // POST /api/admin/login
+router.post('/refresh', adminController.refreshAdminToken);
 router.post('/:id/change-password', adminController.changePassword); // POST /api/admin/:id/change-password
 
 // Password Recovery Routes

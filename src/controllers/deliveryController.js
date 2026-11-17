@@ -33,6 +33,18 @@ const DELIVERY_NOTIFICATION_TITLES = [
   'Laundry Delivered',
 ];
 
+const PAID_PAYMENT_STATUSES = new Set(['paid', 'success', 'succeeded', 'completed']);
+
+function canMarkDeliveryDelivered(payment) {
+  const method = String(payment?.payment_method || '').toLowerCase();
+  const status = String(payment?.payment_status || '').toLowerCase();
+  if (['cash', 'cod'].includes(method)) {
+    return PAID_PAYMENT_STATUSES.has(status) || status === 'pending';
+  }
+  if (!PAID_PAYMENT_STATUSES.has(status)) return false;
+  return method !== 'qrph' || Boolean(payment.transaction_id);
+}
+
 exports.ensureDeliveryRecord = async ({
   booking_id,
   pickup_address,
@@ -184,6 +196,9 @@ exports.createDelivery = async (req, res) => {
   if (!ALLOWED_STATUS.has(normalizedStatus)) {
     return res.status(400).json({ message: 'Invalid status value' });
   }
+  if (normalizedStatus !== 'pending') {
+    return res.status(409).json({ message: 'A new delivery must start with pending status.' });
+  }
 
   try {
     const delivery = await exports.ensureDeliveryRecord({
@@ -215,7 +230,7 @@ exports.getDeliveries = async (req, res) => {
 
     let sql = `
       SELECT d.*, 
-             b.booking_type, b.booking_date, b.pickup_date, b.status AS booking_status, b.total_amount,
+             b.booking_type, DATE(b.created_at) AS booking_date, b.status AS booking_status, b.total_amount,
              c.first_name AS customer_first_name, c.last_name AS customer_last_name,
              s.name AS shop_name,
              srv.offers AS service_name
@@ -231,7 +246,7 @@ exports.getDeliveries = async (req, res) => {
     if (customer_id) { where.push('d.customer_id = ?'); params.push(customer_id); }
     if (booking_id) { where.push('d.booking_id = ?'); params.push(booking_id); }
     if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
-    sql += ` ORDER BY COALESCE(d.delivery_time, b.pickup_date) DESC`;
+    sql += ` ORDER BY COALESCE(d.delivery_time, b.created_at) DESC`;
 
     const [results] = await db.query(sql, params);
     res.json(results);
@@ -248,7 +263,7 @@ exports.getDeliveryById = async (req, res) => {
   try {
     const sql = `
       SELECT d.*, 
-             b.booking_type, b.booking_date, b.pickup_date, b.total_amount,
+             b.booking_type, DATE(b.created_at) AS booking_date, b.total_amount,
              c.first_name AS customer_first_name, c.last_name AS customer_last_name,
              s.name AS shop_name,
              srv.offers AS service_name
@@ -287,9 +302,47 @@ exports.updateDelivery = async (req, res) => {
   }
 
   try {
+    const adminId = req.authenticatedAdminId;
+    if (!Number.isSafeInteger(adminId) || adminId <= 0) {
+      return res.status(401).json({ message: 'A valid staff login is required.' });
+    }
+    const [contextRows] = await db.query(
+      `SELECT d.status AS current_status, d.booking_id, d.customer_id, d.shop_id, d.service_id,
+              s.admin_id
+       FROM delivery d
+       INNER JOIN shop s ON s.shop_id = d.shop_id
+       WHERE d.delivery_id = ?
+       LIMIT 1`,
+      [id],
+    );
+    if (!contextRows.length) return res.status(404).json({ message: 'Delivery not found' });
+    const current = contextRows[0];
+    if (Number(current.admin_id) !== adminId) {
+      return res.status(403).json({ message: 'You are not authorized to update this shop delivery.' });
+    }
+    if (
+      Number(current.booking_id) !== Number(booking_id) ||
+      Number(current.customer_id) !== Number(customer_id) ||
+      Number(current.shop_id) !== Number(shop_id) ||
+      Number(current.service_id) !== Number(service_id)
+    ) {
+      return res.status(409).json({ message: 'Delivery ownership fields cannot be changed.' });
+    }
+    const currentStatus = String(current.current_status || '').toLowerCase();
+    if (currentStatus === 'delivered' && normalizedStatus !== 'delivered') {
+      return res.status(409).json({ message: 'A delivered laundry cannot return to an earlier delivery status.' });
+    }
+    if (normalizedStatus === 'delivered' && currentStatus !== 'delivered') {
+      return res.status(409).json({ message: 'Use the delivery status endpoint to confirm handover.' });
+    }
+
     const sql = `
       UPDATE delivery 
-      SET pickup_address=?, delivery_address=?, delivery_time=?, status=?, 
+      SET pickup_address=?, delivery_address=?, delivery_time=?, status=?,
+          pickup_time = CASE
+            WHEN ? = 'picked_up' AND pickup_time IS NULL THEN CURRENT_TIMESTAMP
+            ELSE pickup_time
+          END,
           booking_id=?, customer_id=?, shop_id=?, service_id=? 
       WHERE delivery_id=?`;
 
@@ -297,7 +350,8 @@ exports.updateDelivery = async (req, res) => {
       pickup_address, 
       normalizedDeliveryAddress, 
       normalizedDeliveryTime, 
-      status, 
+      normalizedStatus, 
+      normalizedStatus,
       booking_id, 
       customer_id, 
       shop_id, 
@@ -341,8 +395,12 @@ exports.updateDelivery = async (req, res) => {
 exports.updateDeliveryStatus = async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
+  const adminId = req.authenticatedAdminId;
 
   if (!status) return res.status(400).json({ message: 'Status is required' });
+  if (!Number.isSafeInteger(adminId) || adminId <= 0) {
+    return res.status(401).json({ message: 'A valid staff login is required.' });
+  }
   const normalizedStatus = String(status).toLowerCase();
   if (!ALLOWED_STATUS.has(normalizedStatus)) {
     return res.status(400).json({ message: 'Invalid status value' });
@@ -352,11 +410,22 @@ exports.updateDeliveryStatus = async (req, res) => {
     // Fetch delivery for context
     const [rows] = await db.query(`
       SELECT d.*, s.name AS shop_name, b.booking_type, b.total_amount,
+             s.admin_id,
              (SELECT p.payment_method
               FROM payment p
               WHERE p.booking_id = b.booking_id
               ORDER BY p.payment_id DESC
               LIMIT 1) AS payment_method,
+             (SELECT p.status
+              FROM payment p
+              WHERE p.booking_id = b.booking_id
+              ORDER BY p.payment_id DESC
+              LIMIT 1) AS payment_status,
+             (SELECT p.transaction_id
+              FROM payment p
+              WHERE p.booking_id = b.booking_id
+              ORDER BY p.payment_id DESC
+              LIMIT 1) AS transaction_id,
              c.phone_number, c.first_name AS customer_first_name
       FROM delivery d
       LEFT JOIN shop s ON s.shop_id = d.shop_id
@@ -367,10 +436,44 @@ exports.updateDeliveryStatus = async (req, res) => {
     `, [id]);
     if (!rows || rows.length === 0) return res.status(404).json({ message: 'Delivery not found' });
     const d = rows[0];
+    if (Number(d.admin_id) !== adminId) {
+      return res.status(403).json({ message: 'You are not authorized to update this shop delivery.' });
+    }
+    const currentStatus = String(d.status || '').toLowerCase();
+    if (currentStatus === 'delivered' && normalizedStatus !== 'delivered') {
+      return res.status(409).json({ message: 'A delivered laundry cannot return to an earlier delivery status.' });
+    }
+    if (normalizedStatus === 'delivered') {
+      if (currentStatus === 'delivered') {
+        return res.json({ message: 'Delivery was already confirmed as delivered', delivery_id: Number(id), status: 'delivered' });
+      }
+      if (currentStatus !== 'out_for_delivery') {
+        return res.status(409).json({ message: 'Laundry can only be marked delivered after it is out for delivery.' });
+      }
+      if (!canMarkDeliveryDelivered(d)) {
+        return res.status(409).json({
+          message: String(d.payment_method || '').toLowerCase() === 'qrph'
+            ? 'PayMongo must verify the QR Ph payment before delivery can be completed.'
+            : 'Confirm the required payment before delivery can be completed.',
+        });
+      }
+    }
 
-    const [result] = await db.query('UPDATE delivery SET status = ? WHERE delivery_id = ?', [normalizedStatus, id]);
-    if (result.affectedRows === 0) return res.status(404).json({ message: 'Delivery not found' });
-    const isPickupBooking = String(d.booking_type || '').trim().toLowerCase().replace(/[\s-]/g, '') === 'pickup';
+    const [result] = await db.query(
+      `UPDATE delivery
+       SET status = ?,
+           pickup_time = CASE
+             WHEN ? = 'picked_up' AND pickup_time IS NULL THEN CURRENT_TIMESTAMP
+             ELSE pickup_time
+           END
+       WHERE delivery_id = ? AND status = ?`,
+      [normalizedStatus, normalizedStatus, id, d.status]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(409).json({ message: 'Delivery status changed; refresh and try again.' });
+    }
+    const normalizedBookingType = String(d.booking_type || '').trim().toLowerCase().replace(/[\s-]/g, '');
+    const isPickupBooking = normalizedBookingType === 'pickup' || normalizedBookingType === 'delivery';
     const wasOutForDelivery = String(d.status || '').toLowerCase() === 'out_for_delivery';
 
     // Emit socket event and send notification to customer

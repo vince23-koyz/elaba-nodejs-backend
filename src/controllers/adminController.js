@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { createTokenPair, createAccessToken, verifyRefreshToken } = require('../utils/authTokenService');
 const db = require('../config/db'); // promise-based pool
 const { normalizePhoneNumber } = require('../utils/phoneUtils');
 
@@ -146,10 +147,68 @@ exports.loginAdmin = async (req, res) => {
     }
 
     resetFailedLoginAttempt(normalizedPhone);
-    res.json({ success: true, message: 'Login successful!', admin_id: admin.admin_id });
+    let tokens;
+    try {
+      tokens = createTokenPair('admin', admin.admin_id);
+    } catch {
+      console.error('JWT_SECRET is missing or too short; cannot issue admin access token');
+      return res.status(503).json({
+        success: false,
+        code: 'AUTH_UNAVAILABLE',
+        message: 'Login is temporarily unavailable. Please try again later.',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Login successful!',
+      admin_id: admin.admin_id,
+      token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+    });
   } catch (err) {
     console.error("DB Error (loginAdmin):", err);
     res.status(500).json({ success: false, message: 'Database error', error: err.message });
+  }
+};
+
+exports.refreshAdminToken = async (req, res) => {
+  const { refresh_token: refreshToken } = req.body || {};
+  if (typeof refreshToken !== 'string' || !refreshToken) {
+    return res.status(400).json({ success: false, message: 'A refresh token is required.' });
+  }
+
+  let adminId;
+  try {
+    adminId = verifyRefreshToken('admin', refreshToken);
+  } catch {
+    return res.status(401).json({ success: false, message: 'Staff session expired. Please sign in again.' });
+  }
+
+  try {
+    const [admins] = await db.query(
+      'SELECT admin_id FROM admin WHERE admin_id = ? LIMIT 1',
+      [adminId],
+    );
+    if (!admins.length) {
+      return res.status(401).json({ success: false, message: 'Staff session is no longer valid. Please sign in again.' });
+    }
+
+    let accessToken;
+    try {
+      accessToken = createAccessToken('admin', adminId);
+    } catch {
+      console.error('JWT_SECRET is missing or too short; cannot refresh admin access token');
+      return res.status(503).json({
+        success: false,
+        code: 'AUTH_UNAVAILABLE',
+        message: 'Authentication is temporarily unavailable. Please try again later.',
+      });
+    }
+    return res.json({ success: true, token: accessToken });
+  } catch (error) {
+    console.error('Admin access-token refresh database error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to refresh staff session.' });
   }
 };
 

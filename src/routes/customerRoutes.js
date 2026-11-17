@@ -27,6 +27,7 @@ router.post('/forgot-password', customerController.forgotPassword);
 router.post('/change-password', customerController.changePassword);
 router.post('/verify-otp', customerController.verifyOTP);
 router.post('/login', customerLoginLimiter, customerController.loginCustomer);
+router.post('/refresh', customerController.refreshCustomerToken);
 router.get('/', customerController.getAllCustomers); // GET all customers (for dashboard)
 router.get('/:customerId', customerController.getCustomer);
 router.put('/:customerId', customerController.updateCustomer);

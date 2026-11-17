@@ -1,6 +1,30 @@
 const axios = require('axios');
 const { v4: uuid } = require('uuid');
 
+function normalizeQrPhStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (['paid', 'succeeded'].includes(normalized)) return 'paid';
+  if (['failed', 'canceled', 'cancelled', 'expired', 'awaiting_payment_method'].includes(normalized)) {
+    return normalized === 'expired' ? 'expired' : 'failed';
+  }
+  return 'pending';
+}
+
+function toTimestampMilliseconds(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value < 1000000000000 ? value * 1000 : value;
+  }
+  if (typeof value === 'string') {
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue) && numericValue > 0) {
+      return numericValue < 1000000000000 ? numericValue * 1000 : numericValue;
+    }
+    const parsedValue = Date.parse(value);
+    return Number.isNaN(parsedValue) ? null : parsedValue;
+  }
+  return null;
+}
+
 class PayMongoService {
   constructor() {
     this.secretKey = process.env.PAYMONGO_SECRET_KEY || '';
@@ -35,7 +59,7 @@ class PayMongoService {
   }
 
   isRealMode() {
-    return this.mode !== 'mock' && this.secretKey && this.publicKey;
+    return this.mode !== 'mock' && Boolean(this.secretKey && this.publicKey);
   }
 
   // ---------------- MOCK IMPLEMENTATION ----------------
@@ -89,11 +113,33 @@ class PayMongoService {
     const response = await this.secretClient.get(`/checkout_sessions/${sessionId}`);
     return response.data?.data;
   }
+
+  _getCheckoutRedirectUrl(result) {
+    const configuredUrl = result === 'success'
+      ? process.env.PAYMONGO_SUCCESS_URL
+      : process.env.PAYMONGO_CANCEL_URL;
+    if (configuredUrl) {
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(configuredUrl);
+      } catch {
+        throw new Error(`PAYMONGO_${result.toUpperCase()}_URL must be a valid absolute URL`);
+      }
+      if (!['example.com', 'www.example.com'].includes(parsedUrl.hostname.toLowerCase())) {
+        return configuredUrl;
+      }
+    }
+
+    const callbackBase = (
+      process.env.PAYMONGO_CHECKOUT_CALLBACK_BASE ||
+      process.env.PUBLIC_BASE_URL ||
+      `http://10.0.2.2:${process.env.PORT || 5000}`
+    ).replace(/\/+$/, '');
+    return `${callbackBase}/api/payments/gcash/checkout/${result}`;
+  }
+
   // Test/Sandbox: Checkout Sessions (preferred for GCash in sandbox)
   async _createCheckoutSession(amount, description, customerInfo) {
-    // Use example.com success/cancel URLs by default (matches common sandbox demos)
-    const successUrl = process.env.PAYMONGO_SUCCESS_URL || 'https://example.com/success';
-    const cancelUrl = process.env.PAYMONGO_CANCEL_URL || 'https://example.com/cancel';
     const response = await this.secretClient.post('/checkout_sessions', {
       data: {
         attributes: {
@@ -115,8 +161,8 @@ class PayMongoService {
           },
           // Use uppercase, simple descriptor to satisfy provider rules
           statement_descriptor: 'ELABA',
-          success_url: successUrl,
-          cancel_url: cancelUrl
+          success_url: this._getCheckoutRedirectUrl('success'),
+          cancel_url: this._getCheckoutRedirectUrl('cancel')
         }
       }
     });
@@ -241,10 +287,212 @@ class PayMongoService {
     return null;
   }
 
+  _formatQrPhPayment(intent, expirySeconds, fallbackCreatedAt) {
+    const attributes = intent?.attributes || {};
+    const createdAt = fallbackCreatedAt || toTimestampMilliseconds(attributes.created_at) || null;
+    const qrImage = attributes.next_action?.code?.image_url || null;
+    const status = normalizeQrPhStatus(attributes.status);
+
+    return {
+      paymentIntentId: intent?.id || null,
+      paymongoPaymentId: this._extractPayMongoPaymentId(intent),
+      status,
+      providerStatus: attributes.status || null,
+      qrImage,
+      amount: Number.isFinite(Number(attributes.amount)) ? Number(attributes.amount) / 100 : null,
+      currency: attributes.currency || 'PHP',
+      expirySeconds,
+      expiresAt: createdAt
+        ? new Date(createdAt + expirySeconds * 1000).toISOString()
+        : null,
+    };
+  }
+
+  async createQrPhPayment(amount, description, metadata = {}, expirySeconds = 1800) {
+    const amountInPesos = Number(amount);
+    const amountInCentavos = Math.round(amountInPesos * 100);
+    if (!Number.isSafeInteger(amountInCentavos) || amountInCentavos < 100) {
+      return { success: false, error: 'QR Ph payment amount must be at least PHP 1.00' };
+    }
+    if (!Number.isInteger(expirySeconds) || expirySeconds < 60 || expirySeconds > 9000) {
+      return { success: false, error: 'QR Ph expiry must be between 60 and 9000 seconds' };
+    }
+    if (!this.isRealMode()) {
+      return {
+        success: false,
+        error: this.mode === 'test'
+          ? 'PayMongo test keys are not configured'
+          : this.mode === 'mock'
+            ? 'QR Ph is not available in mock mode'
+            : 'PayMongo API keys are not configured',
+      };
+    }
+
+    try {
+      const intentResponse = await this.secretClient.post('/payment_intents', {
+        data: {
+          attributes: {
+            amount: amountInCentavos,
+            currency: 'PHP',
+            payment_method_allowed: ['qrph'],
+            description: description || 'eLaba Pickup and Delivery Payment',
+            statement_descriptor: 'ELABA',
+            metadata,
+          },
+        },
+      }, { timeout: 20000 });
+      const intent = intentResponse.data?.data;
+      const clientKey = intent?.attributes?.client_key;
+      if (!intent?.id || !clientKey) {
+        return { success: false, error: 'PayMongo returned an incomplete QR Ph Payment Intent' };
+      }
+
+      const qrCreatedAt = Date.now();
+      const paymentMethodResponse = await this.publicClient.post('/payment_methods', {
+        data: {
+          attributes: {
+            type: 'qrph',
+            expiry_seconds: expirySeconds,
+          },
+        },
+      }, { timeout: 20000 });
+      const paymentMethod = paymentMethodResponse.data?.data;
+      if (!paymentMethod?.id) {
+        return { success: false, error: 'PayMongo did not return a QR Ph Payment Method' };
+      }
+
+      const attachResponse = await this.publicClient.post(
+        `/payment_intents/${intent.id}/attach`,
+        {
+          data: {
+            attributes: {
+              payment_method: paymentMethod.id,
+              client_key: clientKey,
+            },
+          },
+        },
+        { timeout: 20000 },
+      );
+      const attachedIntent = attachResponse.data?.data;
+      const data = this._formatQrPhPayment(attachedIntent, expirySeconds, qrCreatedAt);
+      if (!data.paymentIntentId || !data.qrImage) {
+        return { success: false, error: 'PayMongo did not return a QR image for this Payment Intent' };
+      }
+      return { success: true, data };
+    } catch (error) {
+      console.error('PayMongo QR Ph creation error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.errors?.[0]?.detail || 'Failed to create QR Ph payment',
+      };
+    }
+  }
+
+  async getQrPhPayment(referenceId, expirySeconds = 1800) {
+    if (!referenceId || !this.isRealMode()) {
+      return { success: false, error: 'PayMongo QR Ph payment reference is unavailable' };
+    }
+
+    try {
+      let intent;
+      let providerStatus = null;
+      if (/^pi_[A-Za-z0-9_]+$/.test(String(referenceId))) {
+        intent = await this._getPaymentIntent(referenceId);
+      } else if (/^pay_[A-Za-z0-9_]+$/.test(String(referenceId))) {
+        const response = await this.secretClient.get(`/payments/${referenceId}`, { timeout: 15000 });
+        const payment = response.data?.data;
+        if (!payment?.id) {
+          return { success: false, error: 'PayMongo returned an incomplete QR Ph payment' };
+        }
+        const attributes = payment?.attributes || {};
+        providerStatus = attributes.status || null;
+        const paymentIntent = attributes.payment_intent_id || attributes.payment_intent;
+        const paymentIntentId = typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id;
+        if (paymentIntentId && /^pi_[A-Za-z0-9_]+$/.test(paymentIntentId)) {
+          intent = await this._getPaymentIntent(paymentIntentId);
+        }
+        if (!intent) {
+          return {
+            success: true,
+            data: {
+              paymentIntentId: paymentIntentId || null,
+              paymongoPaymentId: payment.id,
+              status: normalizeQrPhStatus(providerStatus),
+              providerStatus,
+              qrImage: null,
+              amount: Number.isFinite(Number(attributes.amount)) ? Number(attributes.amount) / 100 : null,
+              currency: attributes.currency || 'PHP',
+              expirySeconds,
+              expiresAt: null,
+            },
+          };
+        }
+      } else {
+        return { success: false, error: 'Invalid PayMongo QR Ph payment reference' };
+      }
+
+      if (!intent?.id) {
+        return { success: false, error: 'PayMongo returned an incomplete QR Ph Payment Intent' };
+      }
+      const data = this._formatQrPhPayment(intent, expirySeconds, null);
+      if (providerStatus) {
+        data.providerStatus = providerStatus;
+        data.status = normalizeQrPhStatus(providerStatus);
+      }
+      if (/^pay_[A-Za-z0-9_]+$/.test(String(referenceId))) {
+        data.paymongoPaymentId = referenceId;
+      }
+      return { success: true, data };
+    } catch (error) {
+      console.error('PayMongo QR Ph status error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.errors?.[0]?.detail || 'Unable to retrieve QR Ph payment status',
+      };
+    }
+  }
+
+  async cancelQrPhPayment(paymentIntentId) {
+    if (!/^pi_[A-Za-z0-9_]+$/.test(String(paymentIntentId || ''))) {
+      return { success: false, error: 'A valid QR Ph Payment Intent reference is required' };
+    }
+    if (!this.isRealMode()) {
+      return {
+        success: false,
+        error: this.mode === 'mock'
+          ? 'QR Ph cancellation is not available in mock mode'
+          : 'PayMongo API keys are not configured',
+      };
+    }
+
+    try {
+      const response = await this.secretClient.post(
+        `/payment_intents/${paymentIntentId}/cancel`,
+        {},
+        { timeout: 15000 },
+      );
+      const intent = response.data?.data;
+      const providerStatus = String(intent?.attributes?.status || '').toLowerCase();
+      if (!intent?.id || !['canceled', 'cancelled'].includes(providerStatus)) {
+        return {
+          success: false,
+          error: 'PayMongo did not confirm that the QR Ph payment was cancelled',
+        };
+      }
+      return { success: true, data: this._formatQrPhPayment(intent, 1800, null) };
+    } catch (error) {
+      console.error('PayMongo QR Ph cancellation error:', error.response?.data || error.message);
+      return {
+        success: false,
+        error: error.response?.data?.errors?.[0]?.detail || 'Unable to cancel the active QR Ph payment',
+      };
+    }
+  }
+
   // ---------------- PUBLIC API ----------------
   async createGCashPayment(amount, description, customerInfo, bookingId) {
     if (!amount || amount <= 0) return { success: false, error: 'Invalid amount' };
-    if (!customerInfo?.name || !customerInfo?.email || !customerInfo?.phone) return { success: false, error: 'Incomplete customer info' };
+    if (!customerInfo?.name || !customerInfo?.phone) return { success: false, error: 'Customer name and phone are required' };
     console.log(`[PayMongo] createGCashPayment mode=${this.mode} real=${this.isRealMode()} amount=${amount}`);
 
     // In TEST mode, require keys; do not silently fall back to mock
@@ -311,6 +559,31 @@ class PayMongoService {
     }
   }
 
+  async getGCashCheckout(referenceId) {
+    if (!referenceId || !this.isRealMode()) return null;
+    try {
+      if (String(referenceId).startsWith('cs_')) {
+        const session = await this._getCheckoutSession(referenceId);
+        const attributes = session?.attributes || {};
+        return {
+          paymentIntentId: referenceId,
+          redirectUrl: attributes.checkout_url || attributes.checkout_url_with_content_security_policy || null,
+        };
+      }
+      if (String(referenceId).startsWith('pi_')) {
+        const intent = await this._getPaymentIntent(referenceId);
+        return {
+          paymentIntentId: referenceId,
+          redirectUrl: intent?.attributes?.next_action?.redirect?.url || null,
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error('[PayMongo] Failed to retrieve GCash checkout:', error.response?.data || error.message);
+      return null;
+    }
+  }
+
   async checkPaymentStatus(paymentIntentId) {
     if (!paymentIntentId) return { success: false, error: 'Payment intent id required' };
     // MOCK mode simply checks mock map
@@ -341,7 +614,7 @@ class PayMongoService {
       if (!this.isRealMode()) {
         return { success: false, error: 'PayMongo test keys not configured' };
       }
-      if (this.useCheckoutSessions) {
+      if (String(paymentIntentId).startsWith('cs_')) {
         try {
           const session = await this._getCheckoutSession(paymentIntentId);
           const attrs = session?.attributes || {};
