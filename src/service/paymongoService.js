@@ -670,68 +670,6 @@ class PayMongoService {
     }
   }
 
-  async createRefund({ paymentId, amount, reason = 'others', notes }) {
-    if (this.mode !== 'test') {
-      return { success: false, error: 'PayMongo refunds are enabled only in test mode' };
-    }
-    if (!this.isRealMode()) {
-      return { success: false, error: 'PayMongo test keys not configured' };
-    }
-    if (!/^pay_[A-Za-z0-9_]+$/.test(String(paymentId || ''))) {
-      return { success: false, error: 'A valid PayMongo payment ID is required' };
-    }
-    const amountInPesos = Number(amount);
-    if (!Number.isFinite(amountInPesos) || amountInPesos <= 0) {
-      return { success: false, error: 'Refund amount must be greater than zero' };
-    }
-
-    try {
-      const response = await this.secretClient.post('/refunds', {
-        data: {
-          attributes: {
-            amount: Math.round(amountInPesos * 100),
-            payment_id: paymentId,
-            reason,
-            ...(notes ? { notes } : {})
-          }
-        }
-      });
-      const refund = response.data?.data;
-      const status = refund?.attributes?.status;
-      if (!refund?.id || !status) {
-        return { success: false, error: 'Malformed PayMongo refund response' };
-      }
-      return { success: true, refund };
-    } catch (error) {
-      console.error('PayMongo refund error:', error.response?.data || error.message);
-      return {
-        success: false,
-        error: error.response?.data?.errors?.[0]?.detail || 'PayMongo refund request failed'
-      };
-    }
-  }
-
-  async getRefund(refundId) {
-    if (this.mode !== 'test') {
-      return { success: false, error: 'PayMongo refunds are enabled only in test mode' };
-    }
-    if (!this.isRealMode()) return { success: false, error: 'PayMongo test keys not configured' };
-    if (!/^[A-Za-z0-9_-]+$/.test(String(refundId || ''))) {
-      return { success: false, error: 'A valid PayMongo refund ID is required' };
-    }
-    try {
-      const response = await this.secretClient.get(`/refunds/${refundId}`);
-      const refund = response.data?.data;
-      if (!refund?.id || !refund?.attributes?.status) {
-        return { success: false, error: 'Malformed PayMongo refund response' };
-      }
-      return { success: true, refund };
-    } catch (error) {
-      console.error('PayMongo refund status error:', error.response?.data || error.message);
-      return { success: false, error: 'Unable to retrieve PayMongo refund status' };
-    }
-  }
-
   // Mark checkout session status (called by controller on success/cancel redirect)
   markCheckoutSession(sessionId, status) {
     if (!sessionId) return false;

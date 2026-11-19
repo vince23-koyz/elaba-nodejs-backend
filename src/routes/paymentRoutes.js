@@ -6,7 +6,6 @@ const requireAdminAuth = require("../middleware/requireAdminAuth");
 const requireCustomerAuth = require("../middleware/requireCustomerAuth");
 
 router.get("/", paymentController.getPayments);
-router.get('/refunds/booking/:bookingId/status', paymentController.syncCustomerRefundStatus);
 router.get('/mode', (req, res) => {
 	try {
 		const paymongoService = require('../service/paymongoService');
