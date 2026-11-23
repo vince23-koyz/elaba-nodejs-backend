@@ -683,7 +683,13 @@ exports.getBookings = async (req, res) => {
      FROM booking b
      JOIN shop s ON b.shop_id = s.shop_id
      JOIN customer c ON b.customer_id = c.customer_id
-     LEFT JOIN payment p ON b.booking_id = p.booking_id
+     LEFT JOIN payment p ON p.payment_id = (
+       SELECT p_latest.payment_id
+       FROM payment p_latest
+       WHERE p_latest.booking_id = b.booking_id
+       ORDER BY p_latest.payment_id DESC
+       LIMIT 1
+     )
      LEFT JOIN services srv ON b.service_id = srv.service_id
     LEFT JOIN delivery d ON b.booking_id = d.booking_id
       AND (
@@ -743,7 +749,13 @@ exports.getBookingById = async (req, res) => {
                  JOIN shop s ON b.shop_id = s.shop_id
                  JOIN customer c ON b.customer_id = c.customer_id
                  LEFT JOIN services srv ON b.service_id = srv.service_id
-                 LEFT JOIN payment p ON b.booking_id = p.booking_id
+                 LEFT JOIN payment p ON p.payment_id = (
+                   SELECT p_latest.payment_id
+                   FROM payment p_latest
+                   WHERE p_latest.booking_id = b.booking_id
+                   ORDER BY p_latest.payment_id DESC
+                   LIMIT 1
+                 )
                  LEFT JOIN delivery d ON b.booking_id = d.booking_id
                    AND (
                      LOWER(REPLACE(REPLACE(b.booking_type, ' ', ''), '-', '')) LIKE '%pickup%'

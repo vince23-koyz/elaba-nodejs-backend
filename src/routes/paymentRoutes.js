@@ -20,6 +20,8 @@ router.post("/gcash/walk-in/:bookingId/create", requireCustomerAuth, paymentCont
 router.post("/gcash/walk-in/:bookingId/verify", requireCustomerAuth, paymentController.verifyWalkInGCashPayment);
 router.post("/qrph/walk-in/:bookingId/create", requireCustomerAuth, paymentController.createWalkInQrPhPayment);
 router.post("/qrph/walk-in/:bookingId/verify", requireCustomerAuth, paymentController.verifyWalkInQrPhPayment);
+router.post("/qrph/walk-in/:bookingId/staff-create", requireAdminAuth, paymentController.createWalkInQrPhPayment);
+router.post("/qrph/walk-in/:bookingId/staff-verify", requireAdminAuth, paymentController.verifyWalkInQrPhPayment);
 router.post("/gcash/laundry-request/:bookingId/create", requireCustomerAuth, paymentController.createLaundryRequestGCashPayment);
 router.post("/gcash/laundry-request/:bookingId/verify", requireCustomerAuth, paymentController.verifyLaundryRequestGCashPayment);
 router.post("/qrph/delivery/:bookingId/create", requireAdminAuth, paymentController.createDeliveryQrPhPayment);

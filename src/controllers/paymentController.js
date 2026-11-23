@@ -961,11 +961,14 @@ async function getWalkInQrPhContext(connection, bookingId, customerId, lockForUp
   const lockClause = lockForUpdate ? ' FOR UPDATE' : '';
   const [bookingRows] = await connection.query(
     `SELECT b.booking_id, b.booking_type, b.customer_id, b.shop_id, b.service_id,
-            b.total_amount, b.price_confirmation_status, b.status
+            b.total_amount, b.price_confirmation_status, b.status,
+            s.admin_id
      FROM booking b
-     WHERE b.booking_id = ? AND b.customer_id = ?
+     LEFT JOIN shop s ON s.shop_id = b.shop_id
+     WHERE b.booking_id = ?
+       AND (? IS NULL OR b.customer_id = ?)
      LIMIT 1${lockClause}`,
-    [bookingId, customerId],
+    [bookingId, customerId ?? null, customerId ?? null],
   );
   if (!bookingRows.length) return null;
   const [paymentRows] = await connection.query(
@@ -976,13 +979,18 @@ async function getWalkInQrPhContext(connection, bookingId, customerId, lockForUp
   return { booking: bookingRows[0], payment: paymentRows[0] || null };
 }
 
-function assertWalkInQrPhContext(context) {
+function assertWalkInQrPhContext(context, adminId = null) {
   if (!context) {
     const error = new Error('Walk-in laundry request was not found');
     error.statusCode = 404;
     throw error;
   }
   const { booking, payment } = context;
+  if (adminId != null && Number(booking.admin_id) !== Number(adminId)) {
+    const error = new Error('You are not authorized to collect payment for this shop');
+    error.statusCode = 403;
+    throw error;
+  }
   if (String(booking.booking_type || '').trim().toLowerCase() !== 'walk in') {
     const error = new Error('QR Ph walk-in payment is only available for walk-in laundry');
     error.statusCode = 409;
@@ -1009,11 +1017,12 @@ function assertWalkInQrPhContext(context) {
 
 exports.createWalkInQrPhPayment = async (req, res) => {
   const bookingId = Number(req.params.bookingId);
-  const customerId = req.authenticatedCustomerId;
+  const customerId = req.authenticatedCustomerId ?? null;
+  const adminId = req.authenticatedAdminId ?? null;
   if (!Number.isSafeInteger(bookingId) || bookingId <= 0) {
     return res.status(400).json({ success: false, message: 'A valid booking ID is required' });
   }
-  if (!Number.isSafeInteger(customerId) || customerId <= 0) {
+  if (customerId == null && adminId == null) {
     return res.status(401).json({ success: false, message: 'A valid customer login is required.' });
   }
   let connection;
@@ -1021,9 +1030,9 @@ exports.createWalkInQrPhPayment = async (req, res) => {
     connection = await db.getConnection();
     await connection.beginTransaction();
     const context = await getWalkInQrPhContext(connection, bookingId, customerId, true);
-    const totalAmount = assertWalkInQrPhContext(context);
+    const totalAmount = assertWalkInQrPhContext(context, adminId);
     const { booking, payment } = context;
-    if (String(payment.payment_method || '').toLowerCase() !== 'qrph') {
+    if (adminId == null && String(payment.payment_method || '').toLowerCase() !== 'qrph') {
       const error = new Error('Select QR Ph as the online payment provider first');
       error.statusCode = 409;
       throw error;
@@ -1087,6 +1096,7 @@ exports.createWalkInQrPhPayment = async (req, res) => {
     payment.status = 'pending';
     payment.paymongo_payment_id = qrPhPayment.paymentIntentId;
     await connection.commit();
+    emitQrPhPaymentStatus(req.app.get('io'), bookingId, booking.customer_id, 'pending');
     return res.status(201).json({ success: true, data: getDeliveryQrPhResponse(bookingId, payment, qrPhPayment, false) });
   } catch (error) {
     if (connection) {
@@ -1104,18 +1114,19 @@ exports.createWalkInQrPhPayment = async (req, res) => {
 
 exports.verifyWalkInQrPhPayment = async (req, res) => {
   const bookingId = Number(req.params.bookingId);
-  const customerId = req.authenticatedCustomerId;
+  const customerId = req.authenticatedCustomerId ?? null;
+  const adminId = req.authenticatedAdminId ?? null;
   let connection;
   try {
     if (!Number.isSafeInteger(bookingId) || bookingId <= 0) {
       return res.status(400).json({ success: false, message: 'A valid booking ID is required' });
     }
-    if (!Number.isSafeInteger(customerId) || customerId <= 0) {
+    if (customerId == null && adminId == null) {
       return res.status(401).json({ success: false, message: 'A valid customer login is required.' });
     }
     connection = await db.getConnection();
     const context = await getWalkInQrPhContext(connection, bookingId, customerId);
-    assertWalkInQrPhContext(context);
+    assertWalkInQrPhContext(context, adminId);
     const { payment } = context;
     if (String(payment.payment_method || '').toLowerCase() !== 'qrph' || !payment.paymongo_payment_id) {
       return res.status(409).json({ success: false, message: 'No QR Ph payment is active for this booking' });
@@ -1156,6 +1167,21 @@ exports.createDeliveryQrPhPayment = async (req, res) => {
   }
   if (!Number.isSafeInteger(adminId) || adminId <= 0) {
     return res.status(401).json({ success: false, message: 'A valid staff login is required.' });
+  }
+
+  try {
+    const [bookingRows] = await db.query(
+      'SELECT booking_type FROM booking WHERE booking_id = ? LIMIT 1',
+      [bookingId],
+    );
+    if (
+      bookingRows[0] &&
+      String(bookingRows[0].booking_type || '').trim().toLowerCase().replace(/[\s_-]/g, '') === 'walkin'
+    ) {
+      return exports.createWalkInQrPhPayment(req, res);
+    }
+  } catch (error) {
+    console.error('Unable to detect walk-in QR Ph booking:', error);
   }
 
   let connection;
@@ -1266,6 +1292,7 @@ exports.createDeliveryQrPhPayment = async (req, res) => {
     payment.status = 'pending';
     payment.paymongo_payment_id = qrPhPayment.paymentIntentId;
     await connection.commit();
+    emitQrPhPaymentStatus(req.app.get('io'), bookingId, booking.customer_id, 'pending');
 
     return res.status(201).json({
       success: true,
@@ -1297,6 +1324,21 @@ exports.verifyDeliveryQrPhPayment = async (req, res) => {
   }
   if (!Number.isSafeInteger(adminId) || adminId <= 0) {
     return res.status(401).json({ success: false, message: 'A valid staff login is required.' });
+  }
+
+  try {
+    const [bookingRows] = await db.query(
+      'SELECT booking_type FROM booking WHERE booking_id = ? LIMIT 1',
+      [bookingId],
+    );
+    if (
+      bookingRows[0] &&
+      String(bookingRows[0].booking_type || '').trim().toLowerCase().replace(/[\s_-]/g, '') === 'walkin'
+    ) {
+      return exports.verifyWalkInQrPhPayment(req, res);
+    }
+  } catch (error) {
+    console.error('Unable to detect walk-in QR Ph verification:', error);
   }
 
   let connection;

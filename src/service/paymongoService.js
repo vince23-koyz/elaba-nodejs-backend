@@ -290,7 +290,13 @@ class PayMongoService {
   _formatQrPhPayment(intent, expirySeconds, fallbackCreatedAt) {
     const attributes = intent?.attributes || {};
     const createdAt = fallbackCreatedAt || toTimestampMilliseconds(attributes.created_at) || null;
-    const qrImage = attributes.next_action?.code?.image_url || null;
+    const qrImage =
+      attributes.next_action?.code?.image_url ||
+      attributes.next_action?.code?.qr_code_url ||
+      attributes.next_action?.code?.image ||
+      attributes.next_action?.qr_code ||
+      attributes.next_action?.qr_code_url ||
+      null;
     const status = normalizeQrPhStatus(attributes.status);
 
     return {
