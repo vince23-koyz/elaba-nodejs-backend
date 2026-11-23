@@ -29,6 +29,11 @@ class PayMongoService {
   constructor() {
     this.secretKey = process.env.PAYMONGO_SECRET_KEY || '';
     this.publicKey = process.env.PAYMONGO_PUBLIC_KEY || '';
+    this.qrSecretKey = process.env.QR_PH_SECRET_KEY || '';
+    this.qrPublicKey =
+      process.env.QR_PH_PUBLIC_KEY ||
+      process.env.QR_PH_PUBLIC_KE ||
+      '';
   this.mode = (process.env.PAYMONGO_MODE || 'mock').toLowerCase(); // 'live' | 'test' | 'sandbox' | 'mock'
   if (this.mode === 'sandbox') this.mode = 'test'; // alias
     const envUseSessions = process.env.PAYMONGO_USE_CHECKOUT_SESSIONS;
@@ -56,10 +61,27 @@ class PayMongoService {
         headers: { 'Content-Type': 'application/json' }
       });
     }
+
+    if (this.isQrRealMode()) {
+      this.qrSecretClient = axios.create({
+        baseURL: this.baseURL,
+        auth: { username: this.qrSecretKey, password: '' },
+        headers: { 'Content-Type': 'application/json' },
+      });
+      this.qrPublicClient = axios.create({
+        baseURL: this.baseURL,
+        auth: { username: this.qrPublicKey, password: '' },
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
   }
 
   isRealMode() {
     return this.mode !== 'mock' && Boolean(this.secretKey && this.publicKey);
+  }
+
+  isQrRealMode() {
+    return Boolean(this.qrSecretKey && this.qrPublicKey);
   }
 
   // ---------------- MOCK IMPLEMENTATION ----------------
@@ -323,19 +345,15 @@ class PayMongoService {
     if (!Number.isInteger(expirySeconds) || expirySeconds < 60 || expirySeconds > 9000) {
       return { success: false, error: 'QR Ph expiry must be between 60 and 9000 seconds' };
     }
-    if (!this.isRealMode()) {
+    if (!this.isQrRealMode()) {
       return {
         success: false,
-        error: this.mode === 'test'
-          ? 'PayMongo test keys are not configured'
-          : this.mode === 'mock'
-            ? 'QR Ph is not available in mock mode'
-            : 'PayMongo API keys are not configured',
+        error: 'QR Ph live API keys are not configured',
       };
     }
 
     try {
-      const intentResponse = await this.secretClient.post('/payment_intents', {
+      const intentResponse = await this.qrSecretClient.post('/payment_intents', {
         data: {
           attributes: {
             amount: amountInCentavos,
@@ -354,7 +372,7 @@ class PayMongoService {
       }
 
       const qrCreatedAt = Date.now();
-      const paymentMethodResponse = await this.publicClient.post('/payment_methods', {
+      const paymentMethodResponse = await this.qrPublicClient.post('/payment_methods', {
         data: {
           attributes: {
             type: 'qrph',
@@ -367,7 +385,7 @@ class PayMongoService {
         return { success: false, error: 'PayMongo did not return a QR Ph Payment Method' };
       }
 
-      const attachResponse = await this.publicClient.post(
+      const attachResponse = await this.qrPublicClient.post(
         `/payment_intents/${intent.id}/attach`,
         {
           data: {
@@ -395,7 +413,7 @@ class PayMongoService {
   }
 
   async getQrPhPayment(referenceId, expirySeconds = 1800) {
-    if (!referenceId || !this.isRealMode()) {
+    if (!referenceId || !this.isQrRealMode()) {
       return { success: false, error: 'PayMongo QR Ph payment reference is unavailable' };
     }
 
@@ -403,9 +421,10 @@ class PayMongoService {
       let intent;
       let providerStatus = null;
       if (/^pi_[A-Za-z0-9_]+$/.test(String(referenceId))) {
-        intent = await this._getPaymentIntent(referenceId);
+        const intentResponse = await this.qrSecretClient.get(`/payment_intents/${referenceId}`, { timeout: 15000 });
+        intent = intentResponse.data?.data;
       } else if (/^pay_[A-Za-z0-9_]+$/.test(String(referenceId))) {
-        const response = await this.secretClient.get(`/payments/${referenceId}`, { timeout: 15000 });
+        const response = await this.qrSecretClient.get(`/payments/${referenceId}`, { timeout: 15000 });
         const payment = response.data?.data;
         if (!payment?.id) {
           return { success: false, error: 'PayMongo returned an incomplete QR Ph payment' };
@@ -415,7 +434,8 @@ class PayMongoService {
         const paymentIntent = attributes.payment_intent_id || attributes.payment_intent;
         const paymentIntentId = typeof paymentIntent === 'string' ? paymentIntent : paymentIntent?.id;
         if (paymentIntentId && /^pi_[A-Za-z0-9_]+$/.test(paymentIntentId)) {
-          intent = await this._getPaymentIntent(paymentIntentId);
+          const intentResponse = await this.qrSecretClient.get(`/payment_intents/${paymentIntentId}`, { timeout: 15000 });
+          intent = intentResponse.data?.data;
         }
         if (!intent) {
           return {
@@ -462,17 +482,15 @@ class PayMongoService {
     if (!/^pi_[A-Za-z0-9_]+$/.test(String(paymentIntentId || ''))) {
       return { success: false, error: 'A valid QR Ph Payment Intent reference is required' };
     }
-    if (!this.isRealMode()) {
+    if (!this.isQrRealMode()) {
       return {
         success: false,
-        error: this.mode === 'mock'
-          ? 'QR Ph cancellation is not available in mock mode'
-          : 'PayMongo API keys are not configured',
+        error: 'QR Ph live API keys are not configured',
       };
     }
 
     try {
-      const response = await this.secretClient.post(
+      const response = await this.qrSecretClient.post(
         `/payment_intents/${paymentIntentId}/cancel`,
         {},
         { timeout: 15000 },
@@ -692,7 +710,12 @@ class PayMongoService {
     return {
       mode: this.mode,
       real: this.isRealMode(),
-      hasKeys: !!(this.secretKey && this.publicKey)
+      hasKeys: !!(this.secretKey && this.publicKey),
+      qr: {
+        live: true,
+        real: this.isQrRealMode(),
+        hasKeys: !!(this.qrSecretKey && this.qrPublicKey),
+      },
     };
   }
 }

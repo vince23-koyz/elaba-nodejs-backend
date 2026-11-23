@@ -1532,17 +1532,18 @@ function verifyPayMongoSignature(rawBody, signatureHeader, webhookSecret) {
     })
   );
   const timestamp = parts.t;
-  const mode = String(process.env.PAYMONGO_MODE || '').toLowerCase();
-  const expectedSignature = ['test', 'sandbox'].includes(mode) ? parts.te : parts.li;
-  if (!timestamp || !expectedSignature) return false;
   const signedPayload = `${timestamp}.${rawBody.toString('utf8')}`;
   const computedSignature = crypto
     .createHmac('sha256', webhookSecret)
     .update(signedPayload)
     .digest('hex');
-  const expected = Buffer.from(expectedSignature, 'utf8');
+  const candidates = [parts.te, parts.li].filter(Boolean);
+  if (!timestamp || candidates.length === 0) return false;
   const computed = Buffer.from(computedSignature, 'utf8');
-  return expected.length === computed.length && crypto.timingSafeEqual(expected, computed);
+  return candidates.some((candidate) => {
+    const expected = Buffer.from(candidate, 'utf8');
+    return expected.length === computed.length && crypto.timingSafeEqual(expected, computed);
+  });
 }
 
 function emitQrPhPaymentStatus(io, bookingId, customerId, status) {
@@ -1797,12 +1798,20 @@ async function handleQrPhWebhook(eventType, resource, io) {
 }
 
 exports.handlePayMongoWebhook = async (req, res) => {
-  const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
+  const webhookSecrets = [
+    process.env.QR_PH_WEBHOOK_SECRET,
+    process.env.PAYMONGO_WEBHOOK_SECRET,
+  ].filter((secret, index, secrets) =>
+    Boolean(secret) && secrets.indexOf(secret) === index
+  );
   const rawBody = Buffer.isBuffer(req.body) ? req.body : null;
-  if (!webhookSecret) {
+  if (webhookSecrets.length === 0) {
     return res.status(503).json({ success: false, message: 'PayMongo webhook secret is not configured' });
   }
-  if (!verifyPayMongoSignature(rawBody, req.get('Paymongo-Signature'), webhookSecret)) {
+  const signatureHeader = req.get('Paymongo-Signature');
+  if (!webhookSecrets.some((secret) =>
+    verifyPayMongoSignature(rawBody, signatureHeader, secret)
+  )) {
     return res.status(401).json({ success: false, message: 'Invalid PayMongo webhook signature' });
   }
 
