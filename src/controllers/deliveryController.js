@@ -395,6 +395,7 @@ exports.updateDelivery = async (req, res) => {
 exports.updateDeliveryStatus = async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
+  const rawEstimatedDeliveryTime = req.body?.estimated_delivery_time;
   const adminId = req.authenticatedAdminId;
 
   if (!status) return res.status(400).json({ message: 'Status is required' });
@@ -404,6 +405,14 @@ exports.updateDeliveryStatus = async (req, res) => {
   const normalizedStatus = String(status).toLowerCase();
   if (!ALLOWED_STATUS.has(normalizedStatus)) {
     return res.status(400).json({ message: 'Invalid status value' });
+  }
+  const estimatedDeliveryTime =
+    typeof rawEstimatedDeliveryTime === 'string' &&
+    /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(rawEstimatedDeliveryTime)
+      ? rawEstimatedDeliveryTime.length === 5 ? `${rawEstimatedDeliveryTime}:00` : rawEstimatedDeliveryTime
+      : null;
+  if (rawEstimatedDeliveryTime !== undefined && !estimatedDeliveryTime) {
+    return res.status(400).json({ message: 'A valid estimated delivery time is required (HH:MM)' });
   }
 
   try {
@@ -440,12 +449,25 @@ exports.updateDeliveryStatus = async (req, res) => {
       return res.status(403).json({ message: 'You are not authorized to update this shop delivery.' });
     }
     const currentStatus = String(d.status || '').toLowerCase();
+    if (normalizedStatus === 'out_for_delivery' &&
+        currentStatus !== 'out_for_delivery' &&
+        !estimatedDeliveryTime) {
+      return res.status(400).json({
+        message: 'Set an estimated delivery time before dispatching the laundry.',
+      });
+    }
     if (currentStatus === 'delivered' && normalizedStatus !== 'delivered') {
       return res.status(409).json({ message: 'A delivered laundry cannot return to an earlier delivery status.' });
     }
     if (normalizedStatus === 'delivered') {
       if (currentStatus === 'delivered') {
-        return res.json({ message: 'Delivery was already confirmed as delivered', delivery_id: Number(id), status: 'delivered' });
+        return res.json({
+          message: 'Delivery was already confirmed as delivered',
+          delivery_id: Number(id),
+          status: 'delivered',
+          estimated_delivery_time: d.estimated_delivery_time,
+          delivered_at: d.delivered_at,
+        });
       }
       if (currentStatus !== 'out_for_delivery') {
         return res.status(409).json({ message: 'Laundry can only be marked delivered after it is out for delivery.' });
@@ -462,16 +484,37 @@ exports.updateDeliveryStatus = async (req, res) => {
     const [result] = await db.query(
       `UPDATE delivery
        SET status = ?,
+           estimated_delivery_time = CASE
+             WHEN ? IS NOT NULL THEN ?
+             ELSE estimated_delivery_time
+           END,
+           delivered_at = CASE
+             WHEN ? = 'delivered' AND delivered_at IS NULL THEN CURRENT_TIMESTAMP
+             ELSE delivered_at
+           END,
            pickup_time = CASE
              WHEN ? = 'picked_up' AND pickup_time IS NULL THEN CURRENT_TIMESTAMP
              ELSE pickup_time
            END
        WHERE delivery_id = ? AND status = ?`,
-      [normalizedStatus, normalizedStatus, id, d.status]
+      [
+        normalizedStatus,
+        estimatedDeliveryTime,
+        estimatedDeliveryTime,
+        normalizedStatus,
+        normalizedStatus,
+        id,
+        d.status,
+      ]
     );
     if (result.affectedRows === 0) {
       return res.status(409).json({ message: 'Delivery status changed; refresh and try again.' });
     }
+    const [updatedDeliveryRows] = await db.query(
+      'SELECT estimated_delivery_time, delivered_at FROM delivery WHERE delivery_id = ? LIMIT 1',
+      [id],
+    );
+    const updatedDelivery = updatedDeliveryRows[0] || {};
     const normalizedBookingType = String(d.booking_type || '').trim().toLowerCase().replace(/[\s-]/g, '');
     const isPickupBooking = normalizedBookingType === 'pickup' || normalizedBookingType === 'delivery';
     const wasOutForDelivery = String(d.status || '').toLowerCase() === 'out_for_delivery';
@@ -488,6 +531,8 @@ exports.updateDeliveryStatus = async (req, res) => {
             booking_id: d.booking_id,
             status: normalizedStatus,
             shop_id: d.shop_id,
+            estimated_delivery_time: updatedDelivery.estimated_delivery_time,
+            delivered_at: updatedDelivery.delivered_at,
           });
         }
         // Customer room
@@ -496,6 +541,8 @@ exports.updateDeliveryStatus = async (req, res) => {
           booking_id: d.booking_id,
           status: normalizedStatus,
           shop_id: d.shop_id,
+          estimated_delivery_time: updatedDelivery.estimated_delivery_time,
+          delivered_at: updatedDelivery.delivered_at,
         });
       }
 
@@ -567,7 +614,13 @@ exports.updateDeliveryStatus = async (req, res) => {
       }
     }
 
-    res.json({ message: 'Delivery status updated', delivery_id: Number(id), status: normalizedStatus });
+    res.json({
+      message: 'Delivery status updated',
+      delivery_id: Number(id),
+      status: normalizedStatus,
+      estimated_delivery_time: updatedDelivery.estimated_delivery_time,
+      delivered_at: updatedDelivery.delivered_at,
+    });
   } catch (err) {
     console.error('DB Error (updateDeliveryStatus):', err);
     res.status(500).json({ message: 'Database error', error: err.message });
