@@ -38,6 +38,7 @@ const PAID_PAYMENT_STATUSES = new Set(['paid', 'success', 'succeeded', 'complete
 function canMarkDeliveryDelivered(payment) {
   const method = String(payment?.payment_method || '').toLowerCase();
   const status = String(payment?.payment_status || '').toLowerCase();
+  if (!method) return true;
   if (['cash', 'cod'].includes(method)) {
     return PAID_PAYMENT_STATUSES.has(status) || status === 'pending';
   }
