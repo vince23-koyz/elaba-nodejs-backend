@@ -449,11 +449,14 @@ exports.updateDeliveryStatus = async (req, res) => {
       return res.status(403).json({ message: 'You are not authorized to update this shop delivery.' });
     }
     const currentStatus = String(d.status || '').toLowerCase();
-    if (normalizedStatus === 'out_for_delivery' &&
+    const needsDeliveryEstimate =
+      (normalizedStatus === 'ready_for_delivery' && currentStatus !== 'ready_for_delivery') ||
+      (normalizedStatus === 'out_for_delivery' &&
         currentStatus !== 'out_for_delivery' &&
-        !estimatedDeliveryTime) {
+        !d.estimated_delivery_time);
+    if (needsDeliveryEstimate && !estimatedDeliveryTime) {
       return res.status(400).json({
-        message: 'Set an estimated delivery time before dispatching the laundry.',
+        message: 'Set an estimated delivery time before preparing or dispatching the laundry.',
       });
     }
     if (currentStatus === 'delivered' && normalizedStatus !== 'delivered') {
@@ -466,7 +469,7 @@ exports.updateDeliveryStatus = async (req, res) => {
           delivery_id: Number(id),
           status: 'delivered',
           estimated_delivery_time: d.estimated_delivery_time,
-          delivered_at: d.delivered_at,
+          delivery_time: d.delivery_time,
         });
       }
       if (currentStatus !== 'out_for_delivery') {
@@ -488,9 +491,9 @@ exports.updateDeliveryStatus = async (req, res) => {
              WHEN ? IS NOT NULL THEN ?
              ELSE estimated_delivery_time
            END,
-           delivered_at = CASE
-             WHEN ? = 'delivered' AND delivered_at IS NULL THEN CURRENT_TIMESTAMP
-             ELSE delivered_at
+           delivery_time = CASE
+             WHEN ? = 'delivered' AND delivery_time IS NULL THEN CURRENT_TIMESTAMP
+             ELSE delivery_time
            END,
            pickup_time = CASE
              WHEN ? = 'picked_up' AND pickup_time IS NULL THEN CURRENT_TIMESTAMP
@@ -511,7 +514,7 @@ exports.updateDeliveryStatus = async (req, res) => {
       return res.status(409).json({ message: 'Delivery status changed; refresh and try again.' });
     }
     const [updatedDeliveryRows] = await db.query(
-      'SELECT estimated_delivery_time, delivered_at FROM delivery WHERE delivery_id = ? LIMIT 1',
+      'SELECT estimated_delivery_time, delivery_time FROM delivery WHERE delivery_id = ? LIMIT 1',
       [id],
     );
     const updatedDelivery = updatedDeliveryRows[0] || {};
@@ -532,7 +535,7 @@ exports.updateDeliveryStatus = async (req, res) => {
             status: normalizedStatus,
             shop_id: d.shop_id,
             estimated_delivery_time: updatedDelivery.estimated_delivery_time,
-            delivered_at: updatedDelivery.delivered_at,
+            delivery_time: updatedDelivery.delivery_time,
           });
         }
         // Customer room
@@ -542,7 +545,7 @@ exports.updateDeliveryStatus = async (req, res) => {
           status: normalizedStatus,
           shop_id: d.shop_id,
           estimated_delivery_time: updatedDelivery.estimated_delivery_time,
-          delivered_at: updatedDelivery.delivered_at,
+          delivery_time: updatedDelivery.delivery_time,
         });
       }
 
@@ -619,7 +622,7 @@ exports.updateDeliveryStatus = async (req, res) => {
       delivery_id: Number(id),
       status: normalizedStatus,
       estimated_delivery_time: updatedDelivery.estimated_delivery_time,
-      delivered_at: updatedDelivery.delivered_at,
+      delivery_time: updatedDelivery.delivery_time,
     });
   } catch (err) {
     console.error('DB Error (updateDeliveryStatus):', err);

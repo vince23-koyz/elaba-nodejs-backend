@@ -678,7 +678,7 @@ exports.getBookings = async (req, res) => {
        b.service_id, srv.offers AS service_name,
       d.delivery_id, d.pickup_address AS requested_pickup_address,
       d.delivery_address AS requested_delivery_address, d.delivery_time,
-      d.estimated_pickup_time, d.estimated_delivery_time, d.pickup_time, d.delivered_at,
+      d.estimated_pickup_time, d.estimated_delivery_time, d.pickup_time,
       d.status AS delivery_status
      FROM booking b
      JOIN shop s ON b.shop_id = s.shop_id
@@ -743,7 +743,7 @@ exports.getBookingById = async (req, res) => {
                         p.payment_id, p.payment_method, p.status AS payment_status, p.date,
                         d.delivery_id, d.pickup_address AS requested_pickup_address,
                         d.delivery_address AS requested_delivery_address, d.delivery_time,
-                        d.estimated_pickup_time, d.estimated_delivery_time, d.pickup_time, d.delivered_at,
+                        d.estimated_pickup_time, d.estimated_delivery_time, d.pickup_time,
                         d.status AS delivery_status
                  FROM booking b
                  JOIN shop s ON b.shop_id = s.shop_id
